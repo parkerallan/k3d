@@ -14,6 +14,10 @@ static GLfloat yspeed;
 static GLfloat z = -5.0f;
 
 static GLuint texture;
+static K3DMesh *mesh = NULL;
+static K3DSkeleton *skeleton = NULL;
+static K3DSkeletalAnimation *skeletalClip = NULL;
+static K3DVertexAnimation *vertexClip = NULL;
 static K3DAnimationPlayer *player = NULL;
 static const K3DAnimation *skeletalAnimation = NULL;
 static const K3DAnimation *vertexAnimation = NULL;
@@ -50,6 +54,9 @@ int main(int argc, char **argv) {
     GLboolean lp = GL_FALSE;
     GLboolean rp = GL_FALSE;
 
+    (void)argc;
+    (void)argv;
+
     glKosInit();
 
     glMatrixMode(GL_PROJECTION);
@@ -82,15 +89,50 @@ int main(int argc, char **argv) {
     texture = glTextureLoadPVR("/rd/glass.pvr", 0, 0);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_FILTER, GL_FILTER_BILINEAR);
 
-    player = k3d_animation_player_load("/rd/ball.k3d", "/rd/ball.k3sk",
-                                       "/rd/ball_Bounce.k3sa", "/rd/ball_Spike.k3va");
-    if(!player) {
-        printf("Failed to load animated K3D mesh, exiting\n");
+    mesh = k3d_load("/rd/ik-test.k3d");
+    skeleton = k3d_skeleton_load("/rd/ik-test.k3sk");
+    skeletalClip = k3d_skeletal_animation_load("/rd/ik-test_Wiggle.k3sa");
+    vertexClip = k3d_vertex_animation_load("/rd/ik-test_Squash.k3va");
+
+    if(!mesh || !skeleton || !skeletalClip || !vertexClip) {
+        printf("Failed to load K3D assets, exiting\n");
+        k3d_vertex_animation_free(vertexClip);
+        k3d_skeletal_animation_free(skeletalClip);
+        k3d_skeleton_free(skeleton);
+        k3d_free(mesh);
         return 1;
     }
 
-    skeletalAnimation = k3d_animation_player_get_animation(player, 0);
-    vertexAnimation = k3d_animation_player_get_animation(player, 1);
+    player = k3d_animation_player_create(mesh, skeleton);
+    if(!player) {
+        printf("Failed to create animation player, exiting\n");
+        k3d_vertex_animation_free(vertexClip);
+        k3d_skeletal_animation_free(skeletalClip);
+        k3d_skeleton_free(skeleton);
+        k3d_free(mesh);
+        return 1;
+    }
+
+    skeletalAnimation = k3d_animation_player_add_skeletal(player, "Wiggle", skeletalClip);
+    if(!skeletalAnimation) {
+        printf("Failed to register skeletal animation, exiting\n");
+        k3d_animation_player_free(player);
+        k3d_skeletal_animation_free(skeletalClip);
+        k3d_skeleton_free(skeleton);
+        k3d_free(mesh);
+        return 1;
+    }
+
+    vertexAnimation = k3d_animation_player_add_vertex(player, "Squash", vertexClip);
+    if(!vertexAnimation) {
+        printf("Failed to register vertex animation, exiting\n");
+        k3d_animation_player_free(player);
+        k3d_vertex_animation_free(vertexClip);
+        k3d_skeletal_animation_free(skeletalClip);
+        k3d_skeleton_free(skeleton);
+        k3d_free(mesh);
+        return 1;
+    }
 
     lastTicks = timer_ms_gettime64();
 
@@ -106,15 +148,20 @@ int main(int argc, char **argv) {
             break;
         }
 
-        if(state->buttons & CONT_START)
+        if(state->buttons & CONT_START) {
             break;
+        }
 
         if(state->buttons & CONT_A) {
-            if(z >= -15.0f) z -= 0.02f;
+            if(z >= -15.0f) {
+                z -= 0.02f;
+            }
         }
 
         if(state->buttons & CONT_B) {
-            if(z <= 0.0f) z += 0.02f;
+            if(z <= 0.0f) {
+                z += 0.02f;
+            }
         }
 
         if((state->buttons & CONT_X) && !xp) {
@@ -124,28 +171,34 @@ int main(int argc, char **argv) {
             printf("%s\n", cfogMode[fogType]);
         }
 
-        if(!(state->buttons & CONT_X))
+        if(!(state->buttons & CONT_X)) {
             xp = GL_FALSE;
+        }
 
         if((state->buttons & CONT_Y) && !yp) {
             yp = GL_TRUE;
             fog = !fog;
         }
 
-        if(!(state->buttons & CONT_Y))
+        if(!(state->buttons & CONT_Y)) {
             yp = GL_FALSE;
+        }
 
-        if(state->buttons & CONT_DPAD_UP)
+        if(state->buttons & CONT_DPAD_UP) {
             xspeed -= 0.01f;
+        }
 
-        if(state->buttons & CONT_DPAD_DOWN)
+        if(state->buttons & CONT_DPAD_DOWN) {
             xspeed += 0.01f;
+        }
 
-        if(state->buttons & CONT_DPAD_LEFT)
+        if(state->buttons & CONT_DPAD_LEFT) {
             yspeed -= 0.01f;
+        }
 
-        if(state->buttons & CONT_DPAD_RIGHT)
+        if(state->buttons & CONT_DPAD_RIGHT) {
             yspeed += 0.01f;
+        }
 
         if(state->ltrig > 0x7f) {
             if(!lp) {
@@ -184,7 +237,9 @@ int main(int argc, char **argv) {
     }
 
     k3d_animation_player_free(player);
+    k3d_vertex_animation_free(vertexClip);
+    k3d_skeletal_animation_free(skeletalClip);
+    k3d_skeleton_free(skeleton);
+    k3d_free(mesh);
     return 0;
 }
-
-

@@ -15,10 +15,19 @@ typedef struct {
     K3DAnimationType type;
 } K3DAnimation;
 
-K3DAnimationPlayer *k3d_animation_player_load(const char *meshPath,
-                                              const char *skeletonPath,
-                                              const char *skeletalAnimPath,
-                                              const char *vertexAnimPath);
+K3DAnimationPlayer *k3d_animation_player_create(K3DMesh *mesh,
+                                                K3DSkeleton *skeleton);
+
+K3DAnimation *k3d_animation_player_add_skeletal(K3DAnimationPlayer *player,
+                                                const char *name,
+                                                K3DSkeletalAnimation *animation);
+
+K3DAnimation *k3d_animation_player_add_vertex(K3DAnimationPlayer *player,
+                                              const char *name,
+                                              K3DVertexAnimation *animation);
+
+const K3DAnimation *k3d_animation_player_find(const K3DAnimationPlayer *player,
+                                              const char *name);
 
 void k3d_animation_player_free(K3DAnimationPlayer *player);
 
@@ -26,12 +35,16 @@ void k3d_animation_player_update(K3DAnimationPlayer *player, float deltaSeconds)
 
 void k3d_animation_player_render(const K3DAnimationPlayer *player);
 
-uint32_t k3d_animation_player_get_animation_count(const K3DAnimationPlayer *player);
+void k3d_animation_player_play(K3DAnimationPlayer *player,
+                               const K3DAnimation *animation);
 
-const K3DAnimation *k3d_animation_player_get_animation(const K3DAnimationPlayer *player,
-                                                       uint32_t index);
+void k3d_animation_player_stop(K3DAnimationPlayer *player,
+                               const K3DAnimation *animation);
 
 void k3d_animation_player_toggle(K3DAnimationPlayer *player,
                                  const K3DAnimation *animation);
+
+void k3d_animation_player_reset(K3DAnimationPlayer *player,
+                                const K3DAnimation *animation);
 
 #endif /* __K3D_ANIMATION_H */

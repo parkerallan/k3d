@@ -13,9 +13,11 @@ typedef struct {
 typedef struct {
     K3DAnimation info;
     PlaybackState state;
-    K3DSkeletalAnimation *skeletal;
-    K3DVertexAnimation *vertex;
-} K3DAnimationSlot;
+    union {
+        K3DSkeletalAnimation *skeletal;
+        K3DVertexAnimation *vertex;
+    } clip;
+} K3DAnimationRecord;
 
 struct K3DAnimationPlayer {
     K3DMesh *mesh;
@@ -26,8 +28,9 @@ struct K3DAnimationPlayer {
     GLfloat *boneMatrices;
     GLfloat *boneNormalMatrices;
     GLfloat *worldMatrices;
-    K3DAnimationSlot animations[2];
+    K3DAnimationRecord *animations;
     uint32_t animationCount;
+    uint32_t animationCapacity;
 };
 
 static void reset_playback_state(PlaybackState *state) {
@@ -39,19 +42,23 @@ static int playback_is_active(const PlaybackState *state) {
     return state->playing || state->timeSeconds > 0.0f;
 }
 
-static void toggle_playback_state(PlaybackState *state, const char *label) {
-    state->playing = !state->playing;
+static void start_playback_state(PlaybackState *state, const char *label) {
+    state->playing = 1;
     state->timeSeconds = 0.0f;
-    printf("%s %s\n", label, state->playing ? "started" : "stopped");
+    printf("%s started\n", label);
 }
 
-static char *duplicate_animation_name(const char *path) {
-    const char *name = path;
-    const char *ext;
+static void stop_playback_state(PlaybackState *state, const char *label) {
+    state->playing = 0;
+    state->timeSeconds = 0.0f;
+    printf("%s stopped\n", label);
+}
+
+static char *duplicate_animation_name(const char *name) {
     size_t length;
     char *result;
 
-    if(!path || !path[0]) {
+    if(!name || !name[0]) {
         result = (char *)malloc(10);
         if(result) {
             memcpy(result, "animation", 10);
@@ -59,18 +66,7 @@ static char *duplicate_animation_name(const char *path) {
         return result;
     }
 
-    ext = strrchr(path, '.');
-    if(strrchr(path, '/')) {
-        name = strrchr(path, '/') + 1;
-    }
-    if(strrchr(name, '\\')) {
-        name = strrchr(name, '\\') + 1;
-    }
-    if(!ext || ext < name) {
-        ext = path + strlen(path);
-    }
-
-    length = (size_t)(ext - name);
+    length = strlen(name);
     result = (char *)malloc(length + 1);
     if(!result) {
         return NULL;
@@ -81,8 +77,8 @@ static char *duplicate_animation_name(const char *path) {
     return result;
 }
 
-static K3DAnimationSlot *find_animation_slot(K3DAnimationPlayer *player,
-                                             const K3DAnimation *animation) {
+static K3DAnimationRecord *find_animation_record(K3DAnimationPlayer *player,
+                                                 const K3DAnimation *animation) {
     uint32_t index;
 
     if(!player || !animation) {
@@ -98,16 +94,17 @@ static K3DAnimationSlot *find_animation_slot(K3DAnimationPlayer *player,
     return NULL;
 }
 
-static K3DAnimationSlot *find_animation_slot_by_type(K3DAnimationPlayer *player,
-                                                     K3DAnimationType type) {
+static K3DAnimationRecord *find_animation_record_by_name(const K3DAnimationPlayer *player,
+                                                         const char *name) {
     uint32_t index;
 
-    if(!player) {
+    if(!player || !name) {
         return NULL;
     }
 
     for(index = 0; index < player->animationCount; ++index) {
-        if(player->animations[index].info.type == type) {
+        if(player->animations[index].info.name &&
+           strcmp(player->animations[index].info.name, name) == 0) {
             return &player->animations[index];
         }
     }
@@ -115,21 +112,58 @@ static K3DAnimationSlot *find_animation_slot_by_type(K3DAnimationPlayer *player,
     return NULL;
 }
 
-static int animation_slot_is_loaded(const K3DAnimationPlayer *player,
-                                    const K3DAnimationSlot *slot) {
-    if(!player || !slot) {
+static K3DAnimationRecord *find_active_animation_by_type(K3DAnimationPlayer *player,
+                                                         K3DAnimationType type) {
+    uint32_t index;
+
+    if(!player) {
+        return NULL;
+    }
+
+    for(index = 0; index < player->animationCount; ++index) {
+        K3DAnimationRecord *record = &player->animations[index];
+
+        if(record->info.type == type && playback_is_active(&record->state)) {
+            return record;
+        }
+    }
+
+    return NULL;
+}
+
+static int animation_record_is_loaded(const K3DAnimationPlayer *player,
+                                      const K3DAnimationRecord *record) {
+    if(!player || !record) {
         return 0;
     }
 
-    if(slot->info.type == K3D_ANIMATION_TYPE_SKELETAL) {
-        return player->skeleton && slot->skeletal;
+    if(record->info.type == K3D_ANIMATION_TYPE_SKELETAL) {
+        return player->skeleton && record->clip.skeletal;
     }
 
-    if(slot->info.type == K3D_ANIMATION_TYPE_VERTEX) {
-        return slot->vertex != NULL;
+    if(record->info.type == K3D_ANIMATION_TYPE_VERTEX) {
+        return record->clip.vertex != NULL;
     }
 
     return 0;
+}
+
+static void stop_other_animations_of_type(K3DAnimationPlayer *player,
+                                          const K3DAnimation *animation) {
+    uint32_t index;
+
+    if(!player || !animation) {
+        return;
+    }
+
+    for(index = 0; index < player->animationCount; ++index) {
+        K3DAnimationRecord *record = &player->animations[index];
+
+        if(record->info.type == animation->type && &record->info != animation) {
+            record->state.playing = 0;
+            record->state.timeSeconds = 0.0f;
+        }
+    }
 }
 
 static void copy_vertex_data(GLfloat *dst, const GLfloat *src, uint32_t vertexCount) {
@@ -137,10 +171,17 @@ static void copy_vertex_data(GLfloat *dst, const GLfloat *src, uint32_t vertexCo
 }
 
 static void sync_base_pose_buffers(K3DAnimationPlayer *player) {
+    if(!player->morphedVertices) {
+        return;
+    }
+
     copy_vertex_data(player->morphedVertices, player->mesh->vertices,
                      player->mesh->vertexCount);
-    copy_vertex_data(player->animatedVertices, player->morphedVertices,
-                     player->mesh->vertexCount);
+
+    if(player->animatedVertices) {
+        copy_vertex_data(player->animatedVertices, player->mesh->vertices,
+                         player->mesh->vertexCount);
+    }
 
     if(player->animatedNormals && player->mesh->normals) {
         copy_vertex_data(player->animatedNormals, player->mesh->normals,
@@ -186,34 +227,16 @@ static float animation_duration_seconds(uint16_t frameCount, uint16_t fps) {
 }
 
 static void free_skeletal_runtime(K3DAnimationPlayer *player) {
-    K3DAnimationSlot *slot = find_animation_slot_by_type(player, K3D_ANIMATION_TYPE_SKELETAL);
-
-    if(slot) {
-        k3d_skeletal_animation_free(slot->skeletal);
-        slot->skeletal = NULL;
-        reset_playback_state(&slot->state);
-    }
-
-    k3d_skeleton_free(player->skeleton);
     free(player->boneMatrices);
     free(player->boneNormalMatrices);
     free(player->worldMatrices);
-    player->skeleton = NULL;
     player->boneMatrices = NULL;
     player->boneNormalMatrices = NULL;
     player->worldMatrices = NULL;
 }
 
 static void free_vertex_runtime(K3DAnimationPlayer *player) {
-    K3DAnimationSlot *slot = find_animation_slot_by_type(player, K3D_ANIMATION_TYPE_VERTEX);
-
-    if(!slot) {
-        return;
-    }
-
-    k3d_vertex_animation_free(slot->vertex);
-    slot->vertex = NULL;
-    reset_playback_state(&slot->state);
+    (void)player;
 }
 
 static void free_animation_names(K3DAnimationPlayer *player) {
@@ -225,6 +248,14 @@ static void free_animation_names(K3DAnimationPlayer *player) {
     }
 }
 
+static void free_animation_records(K3DAnimationPlayer *player) {
+    free_animation_names(player);
+    free(player->animations);
+    player->animations = NULL;
+    player->animationCount = 0;
+    player->animationCapacity = 0;
+}
+
 static void free_player_buffers(K3DAnimationPlayer *player) {
     free(player->morphedVertices);
     free(player->animatedVertices);
@@ -232,6 +263,103 @@ static void free_player_buffers(K3DAnimationPlayer *player) {
     player->morphedVertices = NULL;
     player->animatedVertices = NULL;
     player->animatedNormals = NULL;
+}
+
+static int ensure_base_buffers(K3DAnimationPlayer *player) {
+    if(player->morphedVertices) {
+        return 1;
+    }
+
+    player->morphedVertices = (GLfloat *)malloc(player->mesh->vertexCount * 3 * sizeof(GLfloat));
+    if(!player->morphedVertices) {
+        return 0;
+    }
+
+    if(player->mesh->normals) {
+        player->animatedNormals = (GLfloat *)malloc(player->mesh->vertexCount * 3 * sizeof(GLfloat));
+        if(!player->animatedNormals) {
+            free_player_buffers(player);
+            return 0;
+        }
+    }
+
+    sync_base_pose_buffers(player);
+    return 1;
+}
+
+static int ensure_skeletal_buffers(K3DAnimationPlayer *player) {
+    if(!ensure_base_buffers(player)) {
+        return 0;
+    }
+
+    if(!player->animatedVertices) {
+        player->animatedVertices = (GLfloat *)malloc(player->mesh->vertexCount * 3 * sizeof(GLfloat));
+        if(!player->animatedVertices) {
+            return 0;
+        }
+    }
+
+    if(player->boneMatrices) {
+        sync_base_pose_buffers(player);
+        return 1;
+    }
+
+    player->boneMatrices = (GLfloat *)malloc(player->skeleton->boneCount * 16 * sizeof(GLfloat));
+    player->boneNormalMatrices = (GLfloat *)malloc(player->skeleton->boneCount * 9 * sizeof(GLfloat));
+    player->worldMatrices = (GLfloat *)malloc(player->skeleton->boneCount * 16 * sizeof(GLfloat));
+
+    if(!player->boneMatrices || !player->boneNormalMatrices || !player->worldMatrices) {
+        free_skeletal_runtime(player);
+        return 0;
+    }
+
+    sync_base_pose_buffers(player);
+    return 1;
+}
+
+static int ensure_animation_capacity(K3DAnimationPlayer *player) {
+    uint32_t newCapacity;
+    K3DAnimationRecord *records;
+
+    if(player->animationCount < player->animationCapacity) {
+        return 1;
+    }
+
+    newCapacity = player->animationCapacity ? player->animationCapacity * 2 : 4;
+    records = (K3DAnimationRecord *)realloc(player->animations,
+                                            newCapacity * sizeof(K3DAnimationRecord));
+    if(!records) {
+        return 0;
+    }
+
+    memset(&records[player->animationCapacity], 0,
+           (newCapacity - player->animationCapacity) * sizeof(K3DAnimationRecord));
+    player->animations = records;
+    player->animationCapacity = newCapacity;
+    return 1;
+}
+
+static K3DAnimation *add_animation_record(K3DAnimationPlayer *player,
+                                          const char *name,
+                                          K3DAnimationType type) {
+    K3DAnimationRecord *record;
+    char *duplicateName;
+
+    if(!ensure_animation_capacity(player)) {
+        return NULL;
+    }
+
+    duplicateName = duplicate_animation_name(name);
+    if(!duplicateName) {
+        return NULL;
+    }
+
+    record = &player->animations[player->animationCount++];
+    memset(record, 0, sizeof(*record));
+    record->info.name = duplicateName;
+    record->info.type = type;
+    reset_playback_state(&record->state);
+    return &record->info;
 }
 
 static float clamp01(float value) {
@@ -450,7 +578,7 @@ static void update_playback_state(PlaybackState *state, float deltaSeconds, floa
 }
 
 static void apply_vertex_animation(K3DAnimationPlayer *player) {
-    K3DAnimationSlot *slot;
+    K3DAnimationRecord *record;
     uint32_t vertexIndex;
     float weight = 0.0f;
 
@@ -461,30 +589,28 @@ static void apply_vertex_animation(K3DAnimationPlayer *player) {
     copy_vertex_data(player->morphedVertices, player->mesh->vertices,
                      player->mesh->vertexCount);
 
-    slot = find_animation_slot_by_type(player, K3D_ANIMATION_TYPE_VERTEX);
-    if(!slot || !slot->vertex || slot->vertex->vertexCount != player->mesh->vertexCount) {
+    record = find_active_animation_by_type(player, K3D_ANIMATION_TYPE_VERTEX);
+    if(!record || !record->clip.vertex ||
+       record->clip.vertex->vertexCount != player->mesh->vertexCount) {
         return;
     }
 
-    if(playback_is_active(&slot->state)) {
-        weight = clamp01(sample_vertex_weight(slot->vertex,
-                                              slot->state.timeSeconds));
-    }
-
+    weight = clamp01(sample_vertex_weight(record->clip.vertex,
+                                          record->state.timeSeconds));
     if(weight <= 0.0001f) {
         return;
     }
 
     for(vertexIndex = 0; vertexIndex < player->mesh->vertexCount; ++vertexIndex) {
         uint32_t base = vertexIndex * 3;
-        player->morphedVertices[base + 0] += slot->vertex->deltas[base + 0] * weight;
-        player->morphedVertices[base + 1] += slot->vertex->deltas[base + 1] * weight;
-        player->morphedVertices[base + 2] += slot->vertex->deltas[base + 2] * weight;
+        player->morphedVertices[base + 0] += record->clip.vertex->deltas[base + 0] * weight;
+        player->morphedVertices[base + 1] += record->clip.vertex->deltas[base + 1] * weight;
+        player->morphedVertices[base + 2] += record->clip.vertex->deltas[base + 2] * weight;
     }
 }
 
 static void apply_skeletal_animation(K3DAnimationPlayer *player) {
-    K3DAnimationSlot *slot;
+    K3DAnimationRecord *record;
     uint16_t boneIndex;
     uint32_t vertexIndex;
 
@@ -499,15 +625,11 @@ static void apply_skeletal_animation(K3DAnimationPlayer *player) {
                          player->mesh->vertexCount);
     }
 
-    slot = find_animation_slot_by_type(player, K3D_ANIMATION_TYPE_SKELETAL);
-    if(!player->skeleton || !slot || !slot->skeletal || !player->boneMatrices ||
+    record = find_active_animation_by_type(player, K3D_ANIMATION_TYPE_SKELETAL);
+    if(!player->skeleton || !record || !record->clip.skeletal || !player->boneMatrices ||
        !player->boneNormalMatrices || !player->worldMatrices ||
        player->skeleton->vertexCount != player->mesh->vertexCount ||
-       player->skeleton->boneCount != slot->skeletal->boneCount) {
-        return;
-    }
-
-    if(!playback_is_active(&slot->state)) {
+       player->skeleton->boneCount != record->clip.skeletal->boneCount) {
         return;
     }
 
@@ -518,8 +640,8 @@ static void apply_skeletal_animation(K3DAnimationPlayer *player) {
         GLfloat *skinMatrix = &player->boneMatrices[boneIndex * 16];
         int16_t parentIndex = player->skeleton->bones[boneIndex].parentIndex;
 
-        sample_skeletal_transform(&sampledTransform, slot->skeletal, boneIndex,
-                      slot->state.timeSeconds);
+        sample_skeletal_transform(&sampledTransform, record->clip.skeletal, boneIndex,
+                                  record->state.timeSeconds);
         compose_transform_matrix(localMatrix, &sampledTransform);
 
         if(parentIndex >= 0 && parentIndex < (int16_t)player->skeleton->boneCount) {
@@ -603,113 +725,132 @@ static void apply_skeletal_animation(K3DAnimationPlayer *player) {
     }
 }
 
-static void disable_skeletal_animation(K3DAnimationPlayer *player, const char *message) {
-    printf("%s\n", message);
-    free_skeletal_runtime(player);
-}
-
-static void disable_vertex_animation(K3DAnimationPlayer *player, const char *message) {
-    printf("%s\n", message);
-    free_vertex_runtime(player);
-}
-
-K3DAnimationPlayer *k3d_animation_player_load(const char *meshPath,
-                                              const char *skeletonPath,
-                                              const char *skeletalAnimPath,
-                                              const char *vertexAnimPath) {
+K3DAnimationPlayer *k3d_animation_player_create(K3DMesh *mesh,
+                                                K3DSkeleton *skeleton) {
     K3DAnimationPlayer *player = (K3DAnimationPlayer *)calloc(1, sizeof(K3DAnimationPlayer));
 
-    if(!player) {
-        return NULL;
-    }
-
-    player->animationCount = 2;
-    player->animations[0].info.type = K3D_ANIMATION_TYPE_SKELETAL;
-    player->animations[0].info.name = duplicate_animation_name(skeletalAnimPath);
-    player->animations[1].info.type = K3D_ANIMATION_TYPE_VERTEX;
-    player->animations[1].info.name = duplicate_animation_name(vertexAnimPath);
-
-    player->mesh = k3d_load(meshPath);
-    if(!player->mesh) {
-        free_animation_names(player);
+    if(!player || !mesh) {
         free(player);
         return NULL;
     }
 
-    player->skeleton = k3d_skeleton_load(skeletonPath);
-    player->animations[0].skeletal = k3d_skeletal_animation_load(skeletalAnimPath);
-    player->animations[1].vertex = k3d_vertex_animation_load(vertexAnimPath);
-
-    player->morphedVertices = (GLfloat *)malloc(player->mesh->vertexCount * 3 * sizeof(GLfloat));
-    player->animatedVertices = (GLfloat *)malloc(player->mesh->vertexCount * 3 * sizeof(GLfloat));
-    if(player->mesh->normals) {
-        player->animatedNormals = (GLfloat *)malloc(player->mesh->vertexCount * 3 * sizeof(GLfloat));
-    }
-
-    if(player->skeleton && player->animations[0].skeletal) {
-        player->boneMatrices = (GLfloat *)malloc(player->skeleton->boneCount * 16 * sizeof(GLfloat));
-        player->boneNormalMatrices = (GLfloat *)malloc(player->skeleton->boneCount * 9 * sizeof(GLfloat));
-        player->worldMatrices = (GLfloat *)malloc(player->skeleton->boneCount * 16 * sizeof(GLfloat));
-    }
-
-    if(!player->morphedVertices || !player->animatedVertices ||
-       (player->mesh->normals && !player->animatedNormals) ||
-       ((player->skeleton && player->animations[0].skeletal) &&
-        (!player->boneMatrices || !player->boneNormalMatrices || !player->worldMatrices))) {
-        printf("Failed to allocate animation buffers\n");
-        k3d_animation_player_free(player);
+    if(skeleton && skeleton->vertexCount != mesh->vertexCount) {
+        free(player);
         return NULL;
     }
 
-    if(player->skeleton && player->skeleton->vertexCount != player->mesh->vertexCount) {
-        disable_skeletal_animation(player, "K3D Warning: Skeleton vertex count does not match mesh, disabling skeletal animation");
-    }
-
-    if(player->animations[1].vertex && player->animations[1].vertex->vertexCount != player->mesh->vertexCount) {
-        disable_vertex_animation(player, "K3D Warning: Vertex animation count does not match mesh, disabling vertex animation");
-    }
-
-    if(player->skeleton && player->animations[0].skeletal &&
-       player->skeleton->boneCount != player->animations[0].skeletal->boneCount) {
-        disable_skeletal_animation(player, "K3D Warning: Skeleton bone count does not match skeletal clip, disabling skeletal animation");
-    }
-
-    sync_base_pose_buffers(player);
-
+    player->mesh = mesh;
+    player->skeleton = skeleton;
     return player;
 }
 
+K3DAnimation *k3d_animation_player_add_skeletal(K3DAnimationPlayer *player,
+                                                const char *name,
+                                                K3DSkeletalAnimation *animation) {
+    K3DAnimation *handle;
+    K3DAnimationRecord *record;
+
+    if(!player || !player->mesh || !player->skeleton || !animation) {
+        return NULL;
+    }
+
+    if(player->skeleton->vertexCount != player->mesh->vertexCount ||
+       player->skeleton->boneCount != animation->boneCount) {
+        printf("K3D Warning: rejected skeletal animation '%s' due to mesh or bone count mismatch\n",
+               name ? name : "animation");
+        return NULL;
+    }
+
+    if(!ensure_skeletal_buffers(player)) {
+        return NULL;
+    }
+
+    handle = add_animation_record(player, name, K3D_ANIMATION_TYPE_SKELETAL);
+    if(!handle) {
+        return NULL;
+    }
+
+    record = find_animation_record(player, handle);
+    record->clip.skeletal = animation;
+    return handle;
+}
+
+K3DAnimation *k3d_animation_player_add_vertex(K3DAnimationPlayer *player,
+                                              const char *name,
+                                              K3DVertexAnimation *animation) {
+    K3DAnimation *handle;
+    K3DAnimationRecord *record;
+
+    if(!player || !player->mesh || !animation) {
+        return NULL;
+    }
+
+    if(animation->vertexCount != player->mesh->vertexCount) {
+        printf("K3D Warning: rejected vertex animation '%s' due to vertex count mismatch\n",
+               name ? name : "animation");
+        return NULL;
+    }
+
+    if(!ensure_base_buffers(player)) {
+        return NULL;
+    }
+
+    handle = add_animation_record(player, name, K3D_ANIMATION_TYPE_VERTEX);
+    if(!handle) {
+        return NULL;
+    }
+
+    record = find_animation_record(player, handle);
+    record->clip.vertex = animation;
+    return handle;
+}
+
+const K3DAnimation *k3d_animation_player_find(const K3DAnimationPlayer *player,
+                                              const char *name) {
+    K3DAnimationRecord *record = find_animation_record_by_name(player, name);
+
+    return record ? &record->info : NULL;
+}
+
 void k3d_animation_player_free(K3DAnimationPlayer *player) {
-    if(!player) return;
+    if(!player) {
+        return;
+    }
 
     free_player_buffers(player);
     free_vertex_runtime(player);
     free_skeletal_runtime(player);
-    free_animation_names(player);
-    k3d_free(player->mesh);
+    free_animation_records(player);
     free(player);
 }
 
 void k3d_animation_player_update(K3DAnimationPlayer *player, float deltaSeconds) {
-    float bounceDuration = 0.0f;
-    float spikeDuration = 0.0f;
+    uint32_t index;
 
     if(!player) {
         return;
     }
 
-    if(player->animations[0].skeletal) {
-        bounceDuration = animation_duration_seconds(player->animations[0].skeletal->frameCount,
-                                                    player->animations[0].skeletal->fps);
+    if(player->morphedVertices) {
+        sync_base_pose_buffers(player);
     }
 
-    if(player->animations[1].vertex) {
-        spikeDuration = animation_duration_seconds(player->animations[1].vertex->frameCount,
-                                                   player->animations[1].vertex->fps);
+    for(index = 0; index < player->animationCount; ++index) {
+        K3DAnimationRecord *record = &player->animations[index];
+        float durationSeconds = 0.0f;
+
+        if(record->info.type == K3D_ANIMATION_TYPE_SKELETAL && record->clip.skeletal) {
+            durationSeconds = animation_duration_seconds(record->clip.skeletal->frameCount,
+                                                         record->clip.skeletal->fps);
+        }
+        else if(record->info.type == K3D_ANIMATION_TYPE_VERTEX && record->clip.vertex) {
+            durationSeconds = animation_duration_seconds(record->clip.vertex->frameCount,
+                                                         record->clip.vertex->fps);
+        }
+
+        update_playback_state(&record->state, deltaSeconds, durationSeconds);
     }
 
-    update_playback_state(&player->animations[0].state, deltaSeconds, bounceDuration);
-    update_playback_state(&player->animations[1].state, deltaSeconds, spikeDuration);
     apply_vertex_animation(player);
     apply_skeletal_animation(player);
 }
@@ -722,31 +863,66 @@ void k3d_animation_player_render(const K3DAnimationPlayer *player) {
         return;
     }
 
-    vertexData = player->animatedVertices ? player->animatedVertices : player->mesh->vertices;
+    if(player->boneMatrices && player->animatedVertices) {
+        vertexData = player->animatedVertices;
+    }
+    else if(player->morphedVertices) {
+        vertexData = player->morphedVertices;
+    }
+    else {
+        vertexData = player->mesh->vertices;
+    }
+
     normalData = player->animatedNormals ? player->animatedNormals : player->mesh->normals;
     k3d_render_override(player->mesh, vertexData, normalData);
 }
 
-uint32_t k3d_animation_player_get_animation_count(const K3DAnimationPlayer *player) {
-    return player ? player->animationCount : 0;
-}
+void k3d_animation_player_play(K3DAnimationPlayer *player,
+                               const K3DAnimation *animation) {
+    K3DAnimationRecord *record = find_animation_record(player, animation);
 
-const K3DAnimation *k3d_animation_player_get_animation(const K3DAnimationPlayer *player,
-                                                       uint32_t index) {
-    if(!player || index >= player->animationCount) {
-        return NULL;
+    if(!animation_record_is_loaded(player, record)) {
+        return;
     }
 
-    return &player->animations[index].info;
+    stop_other_animations_of_type(player, animation);
+    start_playback_state(&record->state, record->info.name ? record->info.name : "animation");
+}
+
+void k3d_animation_player_stop(K3DAnimationPlayer *player,
+                               const K3DAnimation *animation) {
+    K3DAnimationRecord *record = find_animation_record(player, animation);
+
+    if(!animation_record_is_loaded(player, record)) {
+        return;
+    }
+
+    stop_playback_state(&record->state, record->info.name ? record->info.name : "animation");
 }
 
 void k3d_animation_player_toggle(K3DAnimationPlayer *player,
                                  const K3DAnimation *animation) {
-    K3DAnimationSlot *slot = find_animation_slot(player, animation);
+    K3DAnimationRecord *record = find_animation_record(player, animation);
 
-    if(!animation_slot_is_loaded(player, slot)) {
+    if(!animation_record_is_loaded(player, record)) {
         return;
     }
 
-    toggle_playback_state(&slot->state, slot->info.name ? slot->info.name : "animation");
+    if(record->state.playing) {
+        k3d_animation_player_stop(player, animation);
+        return;
+    }
+
+    k3d_animation_player_play(player, animation);
+}
+
+void k3d_animation_player_reset(K3DAnimationPlayer *player,
+                                const K3DAnimation *animation) {
+    K3DAnimationRecord *record = find_animation_record(player, animation);
+
+    if(!animation_record_is_loaded(player, record)) {
+        return;
+    }
+
+    reset_playback_state(&record->state);
 }
