@@ -5,6 +5,9 @@ K3D Exporter for Blender
 Exports Blender meshes to K3D binary format optimized for Dreamcast/KGL.
 """
 
+import os
+import re
+
 import bpy
 import bmesh
 from bpy_extras.io_utils import ExportHelper
@@ -40,6 +43,24 @@ class ExportK3D(bpy.types.Operator, ExportHelper):
     export_uvs: BoolProperty(
         name="Export UVs",
         description="Include texture coordinates in export",
+        default=True,
+    )
+
+    export_skeleton: BoolProperty(
+        name="Export Skeleton Sidecar",
+        description="Write a .k3sk file with deform bones and weights",
+        default=True,
+    )
+
+    export_actions: BoolProperty(
+        name="Export Action Clips",
+        description="Write one .k3sa file per Blender action that affects the armature",
+        default=True,
+    )
+
+    export_shapekeys: BoolProperty(
+        name="Export Shapekey Clips",
+        description="Write one .k3va file per animated shapekey",
         default=True,
     )
     
@@ -85,10 +106,23 @@ class ExportK3D(bpy.types.Operator, ExportHelper):
             mesh.calc_normals_split()
             
             # Extract mesh data
-            vertices, normals, uvs, indices, primitive_type = self.extract_mesh_data(mesh)
+            vertices, normals, uvs, indices, primitive_type, source_vertex_indices = \
+                self.extract_mesh_data(mesh)
             
             # Write K3D file
             self.write_k3d_file(filepath, vertices, normals, uvs, indices, primitive_type)
+
+            armature_obj = self.find_armature_object(obj)
+            if self.export_skeleton and armature_obj:
+                skeleton_data = self.extract_skeleton_data(obj, armature_obj, source_vertex_indices)
+                if skeleton_data:
+                    self.write_skeleton_file(filepath, skeleton_data)
+
+                if self.export_actions and skeleton_data:
+                    self.write_action_files(context, filepath, obj, armature_obj, skeleton_data['bones'])
+
+            if self.export_shapekeys:
+                self.write_shapekey_files(context, filepath, obj, source_vertex_indices)
             
             # Cleanup
             obj_eval.to_mesh_clear()
@@ -125,6 +159,7 @@ class ExportK3D(bpy.types.Operator, ExportHelper):
         normals = []
         uvs = []
         indices = []
+        source_vertex_indices = []
         
         next_index = 0
         
@@ -180,6 +215,7 @@ class ExportK3D(bpy.types.Operator, ExportHelper):
                     vertices.append(pos_orig)
                     normals.append(normal_orig)
                     uvs.append(uv_orig)
+                    source_vertex_indices.append(loop.vertex_index)
                     indices.append(next_index)
                     next_index += 1
             
@@ -208,6 +244,7 @@ class ExportK3D(bpy.types.Operator, ExportHelper):
                     vertices.append(pos_orig)
                     normals.append(normal_orig)
                     uvs.append(uv_orig)
+                    source_vertex_indices.append(loop.vertex_index)
                     indices.append(next_index)
                     next_index += 1
                 
@@ -232,6 +269,7 @@ class ExportK3D(bpy.types.Operator, ExportHelper):
                     vertices.append(pos_orig)
                     normals.append(normal_orig)
                     uvs.append(uv_orig)
+                    source_vertex_indices.append(loop.vertex_index)
                     indices.append(next_index)
                     next_index += 1
             
@@ -260,10 +298,250 @@ class ExportK3D(bpy.types.Operator, ExportHelper):
                         vertices.append(pos_orig)
                         normals.append(normal_orig)
                         uvs.append(uv_orig)
+                        source_vertex_indices.append(loop.vertex_index)
                         indices.append(next_index)
                         next_index += 1
         
-        return vertices, normals, uvs, indices, primitive_type
+        return vertices, normals, uvs, indices, primitive_type, source_vertex_indices
+
+    def find_armature_object(self, obj):
+        """Find the armature driving the exported mesh, if any."""
+        if obj.parent and obj.parent.type == 'ARMATURE':
+            return obj.parent
+
+        for modifier in obj.modifiers:
+            if modifier.type == 'ARMATURE' and modifier.object:
+                return modifier.object
+
+        return None
+
+    def sanitize_name(self, name):
+        """Convert a Blender name into a filename-safe suffix."""
+        cleaned = re.sub(r'[^A-Za-z0-9_-]+', '_', name.strip())
+        return cleaned or "clip"
+
+    def flatten_matrix(self, matrix):
+        """Flatten a Blender matrix in column-major order for the runtime."""
+        return [matrix[row][col] for col in range(4) for row in range(4)]
+
+    def build_output_path(self, filepath, suffix, extension):
+        """Create a sidecar filename next to the mesh file."""
+        base, _ = os.path.splitext(filepath)
+        return f"{base}{suffix}{extension}"
+
+    def pack_weights(self, weighted_groups):
+        """Pack up to four weights into byte-sized indices and weights."""
+        selected = weighted_groups[:4]
+        total = sum(weight for _, weight in selected)
+        indices = [255, 255, 255, 255]
+        weights = [0, 0, 0, 0]
+
+        if total <= 0.0:
+            return indices, weights
+
+        normalized = []
+        for bone_index, weight in selected:
+            normalized.append((bone_index, weight / total))
+
+        running_total = 0
+        for slot, (bone_index, weight) in enumerate(normalized):
+            indices[slot] = bone_index
+            if slot == len(normalized) - 1:
+                packed = max(0, 255 - running_total)
+            else:
+                packed = int(round(weight * 255.0))
+                packed = max(0, min(255, packed))
+                running_total += packed
+            weights[slot] = packed
+
+        return indices, weights
+
+    def extract_skeleton_data(self, obj, armature_obj, source_vertex_indices):
+        """Extract deform bones, inverse bind matrices, and per-exported-vertex weights."""
+        mesh_local_from_armature = obj.matrix_world.inverted() @ armature_obj.matrix_world
+        deform_bones = [bone for bone in armature_obj.data.bones if bone.use_deform]
+        bone_index_map = {bone.name: index for index, bone in enumerate(deform_bones)}
+        influences = []
+        bones = []
+
+        if not deform_bones:
+            return None
+
+        for bone in deform_bones:
+            parent_index = -1
+            if bone.parent and bone.parent.name in bone_index_map:
+                parent_index = bone_index_map[bone.parent.name]
+
+            bind_matrix = mesh_local_from_armature @ bone.matrix_local
+            bones.append({
+                'parent_index': parent_index,
+                'inverse_bind': self.flatten_matrix(bind_matrix.inverted())
+            })
+
+        original_mesh = obj.data
+        vertex_groups = {group.index: group.name for group in obj.vertex_groups}
+        for source_index in source_vertex_indices:
+            weighted_groups = []
+
+            if source_index < len(original_mesh.vertices):
+                for group in original_mesh.vertices[source_index].groups:
+                    group_name = vertex_groups.get(group.group)
+                    if group_name in bone_index_map and group.weight > 0.0:
+                        weighted_groups.append((bone_index_map[group_name], group.weight))
+
+            weighted_groups.sort(key=lambda item: item[1], reverse=True)
+            bone_indices, bone_weights = self.pack_weights(weighted_groups)
+            influences.append({
+                'bone_indices': bone_indices,
+                'bone_weights': bone_weights,
+            })
+
+        return {
+            'bones': bones,
+            'influences': influences,
+        }
+
+    def find_action_fps(self, context):
+        """Return the effective scene frame rate as an integer."""
+        scene = context.scene
+        if scene.render.fps_base:
+            return max(1, int(round(scene.render.fps / scene.render.fps_base)))
+        return max(1, int(scene.render.fps))
+
+    def iter_armature_actions(self, armature_obj):
+        """Yield actions that animate pose bones on the target armature."""
+        for action in bpy.data.actions:
+            if any(curve.data_path.startswith('pose.bones[') for curve in action.fcurves):
+                yield action
+
+    def write_skeleton_file(self, filepath, skeleton_data):
+        """Write the shared skeleton sidecar."""
+        skeleton_path = self.build_output_path(filepath, '', '.k3sk')
+        with open(skeleton_path, 'wb') as handle:
+            k3d_format.write_k3sk_file(handle, skeleton_data['bones'], skeleton_data['influences'])
+
+    def write_action_files(self, context, filepath, obj, armature_obj, bones):
+        """Write one skeletal action clip sidecar per Blender action."""
+        fps = self.find_action_fps(context)
+        original_action = armature_obj.animation_data.action if armature_obj.animation_data else None
+        original_frame = context.scene.frame_current
+        pose_bones = armature_obj.pose.bones
+        bone_names = [bone.name for bone in armature_obj.data.bones if bone.use_deform]
+        mesh_local_from_armature = obj.matrix_world.inverted() @ armature_obj.matrix_world
+
+        if not armature_obj.animation_data:
+            armature_obj.animation_data_create()
+
+        try:
+            for action in self.iter_armature_actions(armature_obj):
+                start = int(action.frame_range[0])
+                end = int(action.frame_range[1])
+                frames = []
+                armature_obj.animation_data.action = action
+
+                for frame in range(start, end + 1):
+                    context.scene.frame_set(frame)
+                    frame_transforms = []
+
+                    for bone_name in bone_names:
+                        pose_bone = pose_bones.get(bone_name)
+                        if pose_bone is None:
+                            frame_transforms.append({
+                                'translation': (0.0, 0.0, 0.0),
+                                'rotation': (0.0, 0.0, 0.0, 1.0),
+                                'scale': (1.0, 1.0, 1.0),
+                            })
+                            continue
+
+                        if pose_bone.parent and pose_bone.parent.name in bone_names:
+                            local_matrix = pose_bone.parent.matrix.inverted() @ pose_bone.matrix
+                        else:
+                            local_matrix = mesh_local_from_armature @ pose_bone.matrix
+
+                        location, rotation, scale = local_matrix.decompose()
+                        frame_transforms.append({
+                            'translation': (location.x, location.y, location.z),
+                            'rotation': (rotation.x, rotation.y, rotation.z, rotation.w),
+                            'scale': (scale.x, scale.y, scale.z),
+                        })
+
+                    frames.append(frame_transforms)
+
+                action_path = self.build_output_path(
+                    filepath,
+                    f"_{self.sanitize_name(action.name)}",
+                    '.k3sa'
+                )
+                with open(action_path, 'wb') as handle:
+                    k3d_format.write_k3sa_file(handle, len(bones), fps, frames)
+        finally:
+            armature_obj.animation_data.action = original_action
+            context.scene.frame_set(original_frame)
+
+    def iter_shapekey_actions(self, shape_keys, key_name):
+        """Yield actions that animate the given shapekey."""
+        needle = f'key_blocks["{key_name}"].value'
+        for action in bpy.data.actions:
+            if any(curve.data_path == needle for curve in action.fcurves):
+                yield action
+
+    def write_shapekey_files(self, context, filepath, obj, source_vertex_indices):
+        """Write one vertex animation sidecar per animated non-basis shapekey."""
+        shape_keys = obj.data.shape_keys
+        original_frame = context.scene.frame_current
+        fps = self.find_action_fps(context)
+
+        if not shape_keys or not shape_keys.key_blocks:
+            return
+
+        basis_key = shape_keys.reference_key
+        if basis_key is None:
+            return
+
+        if not shape_keys.animation_data:
+            shape_keys.animation_data_create()
+
+        original_action = shape_keys.animation_data.action
+
+        try:
+            for key_block in shape_keys.key_blocks:
+                if key_block == basis_key:
+                    continue
+
+                actions = list(self.iter_shapekey_actions(shape_keys, key_block.name))
+                deltas = []
+                for source_index in source_vertex_indices:
+                    if source_index >= len(basis_key.data) or source_index >= len(key_block.data):
+                        deltas.append((0.0, 0.0, 0.0))
+                        continue
+
+                    basis = basis_key.data[source_index].co
+                    target = key_block.data[source_index].co
+                    deltas.append((target.x - basis.x, target.y - basis.y, target.z - basis.z))
+
+                if actions:
+                    action = actions[0]
+                    start = int(action.frame_range[0])
+                    end = int(action.frame_range[1])
+                    weights = []
+                    shape_keys.animation_data.action = action
+
+                    for frame in range(start, end + 1):
+                        context.scene.frame_set(frame)
+                        weights.append(key_block.value)
+                else:
+                    weights = [1.0]
+
+                vertex_path = self.build_output_path(
+                    filepath,
+                    f"_{self.sanitize_name(key_block.name)}",
+                    '.k3va'
+                )
+                with open(vertex_path, 'wb') as handle:
+                    k3d_format.write_k3va_file(handle, deltas, weights, fps)
+        finally:
+            shape_keys.animation_data.action = original_action
+            context.scene.frame_set(original_frame)
     
     def write_k3d_file(self, filepath, vertices, normals, uvs, indices, primitive_type):
         """

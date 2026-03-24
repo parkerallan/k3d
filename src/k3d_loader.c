@@ -13,6 +13,59 @@
 #include <string.h>
 #include <inttypes.h>
 
+typedef struct {
+    char magic[4];
+    uint16_t version;
+    uint16_t boneCount;
+    uint32_t vertexCount;
+} __attribute__((packed)) K3DSkeletonHeader;
+
+typedef struct {
+    char magic[4];
+    uint16_t version;
+    uint16_t boneCount;
+    uint16_t frameCount;
+    uint16_t fps;
+} __attribute__((packed)) K3DSkeletalAnimationHeader;
+
+typedef struct {
+    char magic[4];
+    uint16_t version;
+    uint16_t frameCount;
+    uint16_t fps;
+    uint32_t vertexCount;
+} __attribute__((packed)) K3DVertexAnimationHeader;
+
+static int k3d_read_exact(FILE *file, void *buffer, size_t size,
+                          const char *label) {
+    if(fread(buffer, 1, size, file) != size) {
+        printf("K3D Error: Could not read %s\n", label);
+        return 0;
+    }
+
+    return 1;
+}
+
+static int k3d_validate_sidecar_magic(const char magic[4], const char *expected,
+                                      const char *label) {
+    if(memcmp(magic, expected, 4) != 0) {
+        printf("K3D Error: Invalid %s magic\n", label);
+        return 0;
+    }
+
+    return 1;
+}
+
+static GLenum k3d_get_primitive_mode(uint8_t primitiveType) {
+    switch(primitiveType) {
+        case K3D_PRIMITIVE_QUADS:
+            return GL_QUADS;
+        case K3D_PRIMITIVE_TRIANGLES:
+        default:
+            return GL_TRIANGLES;
+    }
+}
+
 /* Helper function to validate K3D header */
 static int k3d_validate_header(const K3DHeader *header) {
     if(memcmp(header->magic, K3D_MAGIC, 3) != 0) {
@@ -281,34 +334,238 @@ void k3d_free(K3DMesh *mesh) {
     free(mesh);
 }
 
+void k3d_skeleton_free(K3DSkeleton *skeleton) {
+    if(!skeleton) return;
+
+    if(skeleton->bones) free(skeleton->bones);
+    if(skeleton->influences) free(skeleton->influences);
+
+    free(skeleton);
+}
+
+void k3d_skeletal_animation_free(K3DSkeletalAnimation *animation) {
+    if(!animation) return;
+
+    if(animation->frames) free(animation->frames);
+
+    free(animation);
+}
+
+void k3d_vertex_animation_free(K3DVertexAnimation *animation) {
+    if(!animation) return;
+
+    if(animation->deltas) free(animation->deltas);
+    if(animation->weights) free(animation->weights);
+
+    free(animation);
+}
+
+K3DSkeleton *k3d_skeleton_load(const char *filename) {
+    FILE *file;
+    K3DSkeletonHeader header;
+    K3DSkeleton *skeleton = NULL;
+    size_t boneBytes;
+    size_t influenceBytes;
+
+    file = fopen(filename, "rb");
+    if(!file) {
+        printf("K3D Error: Could not open skeleton file: %s\n", filename);
+        return NULL;
+    }
+
+    if(!k3d_read_exact(file, &header, sizeof(header), "skeleton header")) {
+        fclose(file);
+        return NULL;
+    }
+
+    if(!k3d_validate_sidecar_magic(header.magic, K3SK_MAGIC, "skeleton") ||
+       header.version != K3_ANIM_VERSION || header.boneCount == 0 ||
+       header.vertexCount == 0) {
+        printf("K3D Error: Invalid skeleton header\n");
+        fclose(file);
+        return NULL;
+    }
+
+    skeleton = (K3DSkeleton *)calloc(1, sizeof(K3DSkeleton));
+    if(!skeleton) {
+        fclose(file);
+        return NULL;
+    }
+
+    skeleton->boneCount = header.boneCount;
+    skeleton->vertexCount = header.vertexCount;
+    boneBytes = header.boneCount * sizeof(K3DBone);
+    influenceBytes = header.vertexCount * sizeof(K3DVertexInfluence);
+
+    skeleton->bones = (K3DBone *)malloc(boneBytes);
+    skeleton->influences = (K3DVertexInfluence *)malloc(influenceBytes);
+    if(!skeleton->bones || !skeleton->influences) {
+        printf("K3D Error: Could not allocate skeleton data\n");
+        k3d_skeleton_free(skeleton);
+        fclose(file);
+        return NULL;
+    }
+
+    if(!k3d_read_exact(file, skeleton->bones, boneBytes, "skeleton bones") ||
+       !k3d_read_exact(file, skeleton->influences, influenceBytes,
+                       "skeleton influences")) {
+        k3d_skeleton_free(skeleton);
+        fclose(file);
+        return NULL;
+    }
+
+    fclose(file);
+    printf("K3D: Loaded skeleton %s - %u bones, %" PRIu32 " weighted vertices\n",
+           filename, skeleton->boneCount, skeleton->vertexCount);
+    return skeleton;
+}
+
+K3DSkeletalAnimation *k3d_skeletal_animation_load(const char *filename) {
+    FILE *file;
+    K3DSkeletalAnimationHeader header;
+    K3DSkeletalAnimation *animation = NULL;
+    size_t frameBytes;
+
+    file = fopen(filename, "rb");
+    if(!file) {
+        printf("K3D Error: Could not open skeletal animation file: %s\n", filename);
+        return NULL;
+    }
+
+    if(!k3d_read_exact(file, &header, sizeof(header), "skeletal animation header")) {
+        fclose(file);
+        return NULL;
+    }
+
+    if(!k3d_validate_sidecar_magic(header.magic, K3SA_MAGIC, "skeletal animation") ||
+       header.version != K3_ANIM_VERSION || header.boneCount == 0 ||
+       header.frameCount == 0 || header.fps == 0) {
+        printf("K3D Error: Invalid skeletal animation header\n");
+        fclose(file);
+        return NULL;
+    }
+
+    animation = (K3DSkeletalAnimation *)calloc(1, sizeof(K3DSkeletalAnimation));
+    if(!animation) {
+        fclose(file);
+        return NULL;
+    }
+
+    animation->boneCount = header.boneCount;
+    animation->frameCount = header.frameCount;
+    animation->fps = header.fps;
+    frameBytes = (size_t)header.boneCount * header.frameCount * sizeof(K3DTransform);
+    animation->frames = (K3DTransform *)malloc(frameBytes);
+    if(!animation->frames) {
+        printf("K3D Error: Could not allocate skeletal animation frames\n");
+        k3d_skeletal_animation_free(animation);
+        fclose(file);
+        return NULL;
+    }
+
+    if(!k3d_read_exact(file, animation->frames, frameBytes,
+                       "skeletal animation frames")) {
+        k3d_skeletal_animation_free(animation);
+        fclose(file);
+        return NULL;
+    }
+
+    fclose(file);
+    printf("K3D: Loaded skeletal animation %s - %u bones, %u frames @ %u fps\n",
+           filename, animation->boneCount, animation->frameCount, animation->fps);
+    return animation;
+}
+
+K3DVertexAnimation *k3d_vertex_animation_load(const char *filename) {
+    FILE *file;
+    K3DVertexAnimationHeader header;
+    K3DVertexAnimation *animation = NULL;
+    size_t deltaBytes;
+    size_t weightBytes;
+
+    file = fopen(filename, "rb");
+    if(!file) {
+        printf("K3D Error: Could not open vertex animation file: %s\n", filename);
+        return NULL;
+    }
+
+    if(!k3d_read_exact(file, &header, sizeof(header), "vertex animation header")) {
+        fclose(file);
+        return NULL;
+    }
+
+    if(!k3d_validate_sidecar_magic(header.magic, K3VA_MAGIC, "vertex animation") ||
+       header.version != K3_ANIM_VERSION || header.vertexCount == 0 ||
+       header.frameCount == 0 || header.fps == 0) {
+        printf("K3D Error: Invalid vertex animation header\n");
+        fclose(file);
+        return NULL;
+    }
+
+    animation = (K3DVertexAnimation *)calloc(1, sizeof(K3DVertexAnimation));
+    if(!animation) {
+        fclose(file);
+        return NULL;
+    }
+
+    animation->vertexCount = header.vertexCount;
+    animation->frameCount = header.frameCount;
+    animation->fps = header.fps;
+
+    deltaBytes = (size_t)header.vertexCount * 3 * sizeof(GLfloat);
+    weightBytes = (size_t)header.frameCount * sizeof(GLfloat);
+    animation->deltas = (GLfloat *)malloc(deltaBytes);
+    animation->weights = (GLfloat *)malloc(weightBytes);
+    if(!animation->deltas || !animation->weights) {
+        printf("K3D Error: Could not allocate vertex animation data\n");
+        k3d_vertex_animation_free(animation);
+        fclose(file);
+        return NULL;
+    }
+
+    if(!k3d_read_exact(file, animation->deltas, deltaBytes, "vertex deltas") ||
+       !k3d_read_exact(file, animation->weights, weightBytes, "vertex weights")) {
+        k3d_vertex_animation_free(animation);
+        fclose(file);
+        return NULL;
+    }
+
+    fclose(file);
+    printf("K3D: Loaded vertex animation %s - %" PRIu32 " vertices, %u frames @ %u fps\n",
+           filename, animation->vertexCount, animation->frameCount, animation->fps);
+    return animation;
+}
+
 /* Render K3D mesh using OpenGL vertex arrays */
-void k3d_render(const K3DMesh *mesh) {
+void k3d_render_override(const K3DMesh *mesh, const GLfloat *vertices,
+                         const GLfloat *normals) {
     GLenum primitiveMode;
-    
+    const GLfloat *vertexData = vertices;
+    const GLfloat *normalData = normals;
+
     if(!mesh || !mesh->vertices || !mesh->indices) {
         printf("K3D Error: Invalid mesh for rendering\n");
         return;
     }
-    
-    /* Determine GL primitive type */
-    switch(mesh->primitiveType) {
-        case K3D_PRIMITIVE_QUADS:
-            primitiveMode = GL_QUADS;
-            break;
-        case K3D_PRIMITIVE_TRIANGLES:
-        default:
-            primitiveMode = GL_TRIANGLES;
-            break;
+
+    if(!vertexData) {
+        vertexData = mesh->vertices;
     }
+
+    if(!normalData) {
+        normalData = mesh->normals;
+    }
+
+    primitiveMode = k3d_get_primitive_mode(mesh->primitiveType);
     
     /* Enable vertex arrays */
     glEnableClientState(GL_VERTEX_ARRAY);
-    glVertexPointer(3, GL_FLOAT, 0, mesh->vertices);
+    glVertexPointer(3, GL_FLOAT, 0, vertexData);
     
     /* Enable normal arrays if present */
-    if(mesh->normals && (mesh->flags & K3D_HAS_NORMALS)) {
+    if(normalData && (mesh->flags & K3D_HAS_NORMALS)) {
         glEnableClientState(GL_NORMAL_ARRAY);
-        glNormalPointer(GL_FLOAT, 0, mesh->normals);
+        glNormalPointer(GL_FLOAT, 0, normalData);
     }
     
     /* Enable texture coordinate arrays if present */
@@ -322,10 +579,14 @@ void k3d_render(const K3DMesh *mesh) {
     
     /* Disable arrays */
     glDisableClientState(GL_VERTEX_ARRAY);
-    if(mesh->normals && (mesh->flags & K3D_HAS_NORMALS)) {
+    if(normalData && (mesh->flags & K3D_HAS_NORMALS)) {
         glDisableClientState(GL_NORMAL_ARRAY);
     }
     if(mesh->texCoords && (mesh->flags & K3D_HAS_UVS)) {
         glDisableClientState(GL_TEXTURE_COORD_ARRAY);
     }
+}
+
+void k3d_render(const K3DMesh *mesh) {
+    k3d_render_override(mesh, NULL, NULL);
 }

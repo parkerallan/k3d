@@ -1,35 +1,32 @@
 #include <kos.h>
 #include <stdio.h>
-#include <stdlib.h>
 
 #include <KGL/gl.h>
 #include <KGL/glu.h>
 #include <KGL/glut.h>
 
-#include "k3d.h"
+#include "k3d_animation.h"
 
-static GLfloat xrot;        /* X Rotation */
-static GLfloat yrot;        /* Y Rotation */
-static GLfloat xspeed;      /* X Rotation Speed */
-static GLfloat yspeed;      /* Y Rotation Speed */
-static GLfloat z = -5.0f;   /* Depth Into The Screen */
+static GLfloat xrot;
+static GLfloat yrot;
+static GLfloat xspeed;
+static GLfloat yspeed;
+static GLfloat z = -5.0f;
 
-static GLuint  texture;         /* Storage For Texture */
+static GLuint texture;
+static K3DAnimationPlayer *player = NULL;
+static const K3DAnimation *skeletalAnimation = NULL;
+static const K3DAnimation *vertexAnimation = NULL;
 
-/* Storage For Three Types Of Fog */
-GLuint fogType = 0; /* use GL_EXP initially */
+GLuint fogType = 0;
 GLuint fogMode[] = { GL_EXP, GL_EXP2, GL_LINEAR };
 char cfogMode[3][10] = {"GL_EXP   ", "GL_EXP2  ", "GL_LINEAR" };
-GLfloat fogColor[4] = { 0.5f, 0.5f, 0.5f, 1.0f }; /* Fog Color */
+GLfloat fogColor[4] = { 0.5f, 0.5f, 0.5f, 1.0f };
 int fog = GL_TRUE;
 
-/* Load a PVR texture - located in pvr-texture.c */
 extern GLuint glTextureLoadPVR(char *fname, unsigned char isMipMapped, unsigned char glMipMap);
 
-/* K3D Mesh pointer */
-static K3DMesh *mesh = NULL;
-
-void draw_gl(void) {
+static void draw_gl(void) {
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
     glLoadIdentity();
     glTranslatef(0.0f, 0.0f, z);
@@ -38,11 +35,7 @@ void draw_gl(void) {
     glRotatef(yrot, 0.0f, 1.0f, 0.0f);
 
     glBindTexture(GL_TEXTURE_2D, texture);
-
-    /* Render K3D mesh using optimized vertex arrays */
-    if(mesh) {
-        k3d_render(mesh);
-    }
+    k3d_animation_player_render(player);
 
     xrot += xspeed;
     yrot += yspeed;
@@ -51,10 +44,12 @@ void draw_gl(void) {
 int main(int argc, char **argv) {
     maple_device_t *cont;
     cont_state_t *state;
+    uint64_t lastTicks;
     GLboolean xp = GL_FALSE;
     GLboolean yp = GL_FALSE;
+    GLboolean lp = GL_FALSE;
+    GLboolean rp = GL_FALSE;
 
-    /* Get basic stuff initialized */
     glKosInit();
 
     glMatrixMode(GL_PROJECTION);
@@ -68,40 +63,42 @@ int main(int argc, char **argv) {
     glClearColor(0.5f, 0.5f, 0.5f, 1.0f);
     glClearDepth(1.0f);
     glEnable(GL_DEPTH_TEST);
-    glDepthFunc(GL_LEQUAL);    
-    /* Enable normal normalization to maintain lighting after transformations */
+    glDepthFunc(GL_LEQUAL);
     glEnable(GL_NORMALIZE);
-    glColor4f(1.0f, 1.0f, 1.0f, 0.5);
+    glColor4f(1.0f, 1.0f, 1.0f, 0.5f);
     glBlendFunc(GL_SRC_ALPHA, GL_ONE);
 
-    /* Enable Lighting and GL_LIGHT0 */
     glEnable(GL_LIGHTING);
     glEnable(GL_LIGHT0);
 
-    /* Set up the fog */
-    glFogi(GL_FOG_MODE, fogMode[fogType]);     /* Fog Mode */
-    glFogfv(GL_FOG_COLOR, fogColor);           /* Set Fog Color */
-    glFogf(GL_FOG_DENSITY, 0.35f);             /* How Dense The Fog is */
-    glHint(GL_FOG_HINT, GL_DONT_CARE);         /* Fog Hint Value */
-    glFogf(GL_FOG_START, 0.0f);                /* Fog Start Depth */
-    glFogf(GL_FOG_END, 5.0f);                  /* Fog End Depth */
-    glEnable(GL_FOG);                          /* Enables GL_FOG */
+    glFogi(GL_FOG_MODE, fogMode[fogType]);
+    glFogfv(GL_FOG_COLOR, fogColor);
+    glFogf(GL_FOG_DENSITY, 0.35f);
+    glHint(GL_FOG_HINT, GL_DONT_CARE);
+    glFogf(GL_FOG_START, 0.0f);
+    glFogf(GL_FOG_END, 5.0f);
+    glEnable(GL_FOG);
 
-    /* Set up the textures */
     texture = glTextureLoadPVR("/rd/glass.pvr", 0, 0);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_FILTER, GL_FILTER_BILINEAR);
 
-    /* Load the K3D mesh data */
-    mesh = k3d_load("/rd/maid.k3d");
-    if(!mesh) {
-        printf("Failed to load K3D mesh, exiting\n");
+    player = k3d_animation_player_load("/rd/ball.k3d", "/rd/ball.k3sk",
+                                       "/rd/ball_Bounce.k3sa", "/rd/ball_Spike.k3va");
+    if(!player) {
+        printf("Failed to load animated K3D mesh, exiting\n");
         return 1;
     }
 
-    while(1) {
-        cont = maple_enum_type(0, MAPLE_FUNC_CONTROLLER);
+    skeletalAnimation = k3d_animation_player_get_animation(player, 0);
+    vertexAnimation = k3d_animation_player_get_animation(player, 1);
 
-        /* Check key status */
+    lastTicks = timer_ms_gettime64();
+
+    while(1) {
+        float deltaSeconds;
+        uint64_t nowTicks;
+
+        cont = maple_enum_type(0, MAPLE_FUNC_CONTROLLER);
         state = (cont_state_t *)maple_dev_status(cont);
 
         if(!state) {
@@ -150,7 +147,31 @@ int main(int argc, char **argv) {
         if(state->buttons & CONT_DPAD_RIGHT)
             yspeed += 0.01f;
 
-        /* Switch fog off/on */
+        if(state->ltrig > 0x7f) {
+            if(!lp) {
+                lp = GL_TRUE;
+                k3d_animation_player_toggle(player, skeletalAnimation);
+            }
+        }
+        else {
+            lp = GL_FALSE;
+        }
+
+        if(state->rtrig > 0x7f) {
+            if(!rp) {
+                rp = GL_TRUE;
+                k3d_animation_player_toggle(player, vertexAnimation);
+            }
+        }
+        else {
+            rp = GL_FALSE;
+        }
+
+        nowTicks = timer_ms_gettime64();
+        deltaSeconds = (float)(nowTicks - lastTicks) / 1000.0f;
+        lastTicks = nowTicks;
+        k3d_animation_player_update(player, deltaSeconds);
+
         if(fog) {
             glEnable(GL_FOG);
         }
@@ -158,16 +179,11 @@ int main(int argc, char **argv) {
             glDisable(GL_FOG);
         }
 
-        /* Draw the GL "scene" */
         draw_gl();
-
-        /* Finish the frame */
         glutSwapBuffers();
     }
 
-    /* Cleanup */
-    k3d_free(mesh);
-
+    k3d_animation_player_free(player);
     return 0;
 }
 

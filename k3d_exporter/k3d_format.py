@@ -10,6 +10,10 @@ import struct
 # K3D Format Constants
 K3D_MAGIC = b'K3D\x00'
 K3D_VERSION = 1
+K3SK_MAGIC = b'K3SK'
+K3SA_MAGIC = b'K3SA'
+K3VA_MAGIC = b'K3VA'
+K3_ANIM_VERSION = 1
 
 # Feature Flags
 K3D_HAS_NORMALS = 0x0001
@@ -118,3 +122,75 @@ def calculate_flags(has_normals, has_uvs, has_colors=False):
     if has_colors:
         flags |= K3D_HAS_COLORS
     return flags
+
+
+def write_k3sk_file(file, bones, influences):
+    """
+    Write a skeleton sidecar.
+
+    Args:
+        file: Binary file object
+        bones: List of dicts with parent_index and inverse_bind keys
+        influences: List of dicts with bone_indices and bone_weights keys
+    """
+    file.write(K3SK_MAGIC)
+    file.write(struct.pack('<H', K3_ANIM_VERSION))
+    file.write(struct.pack('<H', len(bones)))
+    file.write(struct.pack('<I', len(influences)))
+
+    for bone in bones:
+        file.write(struct.pack('<hh', bone['parent_index'], 0))
+        for value in bone['inverse_bind']:
+            file.write(struct.pack('<f', value))
+
+    for influence in influences:
+        indices = influence['bone_indices']
+        weights = influence['bone_weights']
+        file.write(struct.pack('<4B', *indices))
+        file.write(struct.pack('<4B', *weights))
+
+
+def write_k3sa_file(file, bone_count, fps, frames):
+    """
+    Write one skeletal animation sidecar.
+
+    Args:
+        file: Binary file object
+        bone_count: Number of bones per frame
+        fps: Clip sample rate
+        frames: List of frame lists. Each frame contains bone_count transform dicts.
+    """
+    file.write(K3SA_MAGIC)
+    file.write(struct.pack('<H', K3_ANIM_VERSION))
+    file.write(struct.pack('<H', bone_count))
+    file.write(struct.pack('<H', len(frames)))
+    file.write(struct.pack('<H', fps))
+
+    for frame in frames:
+        for transform in frame:
+            file.write(struct.pack('<3f', *transform['translation']))
+            file.write(struct.pack('<4f', *transform['rotation']))
+            file.write(struct.pack('<3f', *transform['scale']))
+
+
+def write_k3va_file(file, deltas, weights, fps):
+    """
+    Write one vertex animation sidecar.
+
+    Args:
+        file: Binary file object
+        deltas: List of (x, y, z) delta tuples, one per exported vertex
+        weights: List of frame weights
+        fps: Clip sample rate
+    """
+    file.write(K3VA_MAGIC)
+    file.write(struct.pack('<H', K3_ANIM_VERSION))
+    file.write(struct.pack('<H', len(weights)))
+    file.write(struct.pack('<H', fps))
+    file.write(struct.pack('<I', len(deltas)))
+
+    for delta in deltas:
+        file.write(struct.pack('<fff', delta[0], delta[1], delta[2]))
+
+    for weight in weights:
+        file.write(struct.pack('<f', weight))
