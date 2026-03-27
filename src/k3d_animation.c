@@ -8,6 +8,7 @@
 typedef struct {
     int playing;
     float timeSeconds;
+    float value;
 } PlaybackState;
 
 typedef struct {
@@ -33,13 +34,39 @@ struct K3DAnimationPlayer {
     uint32_t animationCapacity;
 };
 
+static float clamp01(float value);
+
 static void reset_playback_state(PlaybackState *state) {
     state->playing = 0;
     state->timeSeconds = 0.0f;
+    state->value = 0.0f;
 }
 
 static int playback_is_active(const PlaybackState *state) {
-    return state->playing || state->timeSeconds > 0.0f;
+    return state->playing || state->timeSeconds > 0.0f || state->value > 0.0f;
+}
+
+// This is optional for vertex/shapekey animations, if you are using a wave function you would only use set_value()
+float k3d_animation_accumulate_value(float currentValue,
+                                     float inputValue,
+                                     float riseRate,
+                                     float fallRate,
+                                     float deltaSeconds) {
+    currentValue = clamp01(currentValue);
+    inputValue = clamp01(inputValue);
+
+    if(deltaSeconds <= 0.0f) {
+        return currentValue;
+    }
+
+    if(inputValue > 0.0f) {
+        currentValue += inputValue * riseRate * deltaSeconds;
+    }
+    else {
+        currentValue -= fallRate * deltaSeconds;
+    }
+
+    return clamp01(currentValue);
 }
 
 static void start_playback_state(PlaybackState *state, const char *label) {
@@ -51,6 +78,7 @@ static void start_playback_state(PlaybackState *state, const char *label) {
 static void stop_playback_state(PlaybackState *state, const char *label) {
     state->playing = 0;
     state->timeSeconds = 0.0f;
+    state->value = 0.0f;
     printf("%s stopped\n", label);
 }
 
@@ -160,8 +188,7 @@ static void stop_other_animations_of_type(K3DAnimationPlayer *player,
         K3DAnimationRecord *record = &player->animations[index];
 
         if(record->info.type == animation->type && &record->info != animation) {
-            record->state.playing = 0;
-            record->state.timeSeconds = 0.0f;
+            reset_playback_state(&record->state);
         }
     }
 }
@@ -543,25 +570,6 @@ static void sample_skeletal_transform(K3DTransform *out,
     quat_nlerp(out->rotation, transformA->rotation, transformB->rotation, frameFraction);
 }
 
-static float sample_vertex_weight(const K3DVertexAnimation *animation, float timeSeconds) {
-    uint16_t frameA;
-    uint16_t frameB;
-    float frameFraction;
-
-    if(animation->frameCount == 1) {
-        return animation->weights[0];
-    }
-
-    sample_frame_window(animation->frameCount, animation->fps, timeSeconds,
-                        &frameA, &frameB, &frameFraction);
-    if(frameA == frameB) {
-        return animation->weights[animation->frameCount - 1];
-    }
-
-    return animation->weights[frameA] +
-        (animation->weights[frameB] - animation->weights[frameA]) * frameFraction;
-}
-
 static void update_playback_state(PlaybackState *state, float deltaSeconds, float durationSeconds) {
     if(!state->playing) {
         return;
@@ -595,8 +603,7 @@ static void apply_vertex_animation(K3DAnimationPlayer *player) {
         return;
     }
 
-    weight = clamp01(sample_vertex_weight(record->clip.vertex,
-                                          record->state.timeSeconds));
+    weight = clamp01(record->state.value);
     if(weight <= 0.0001f) {
         return;
     }
@@ -842,13 +849,8 @@ void k3d_animation_player_update(K3DAnimationPlayer *player, float deltaSeconds)
         if(record->info.type == K3D_ANIMATION_TYPE_SKELETAL && record->clip.skeletal) {
             durationSeconds = animation_duration_seconds(record->clip.skeletal->frameCount,
                                                          record->clip.skeletal->fps);
+            update_playback_state(&record->state, deltaSeconds, durationSeconds);
         }
-        else if(record->info.type == K3D_ANIMATION_TYPE_VERTEX && record->clip.vertex) {
-            durationSeconds = animation_duration_seconds(record->clip.vertex->frameCount,
-                                                         record->clip.vertex->fps);
-        }
-
-        update_playback_state(&record->state, deltaSeconds, durationSeconds);
     }
 
     apply_vertex_animation(player);
@@ -887,6 +889,10 @@ void k3d_animation_player_play(K3DAnimationPlayer *player,
 
     stop_other_animations_of_type(player, animation);
     start_playback_state(&record->state, record->info.name ? record->info.name : "animation");
+
+    if(animation->type == K3D_ANIMATION_TYPE_VERTEX) {
+        record->state.value = 1.0f;
+    }
 }
 
 void k3d_animation_player_stop(K3DAnimationPlayer *player,
@@ -908,12 +914,36 @@ void k3d_animation_player_toggle(K3DAnimationPlayer *player,
         return;
     }
 
+    if(animation->type == K3D_ANIMATION_TYPE_VERTEX) {
+        if(record->state.value > 0.5f) {
+            k3d_animation_player_stop(player, animation);
+        }
+        else {
+            k3d_animation_player_play(player, animation);
+        }
+        return;
+    }
+
     if(record->state.playing) {
         k3d_animation_player_stop(player, animation);
         return;
     }
 
     k3d_animation_player_play(player, animation);
+}
+
+void k3d_animation_player_set_value(K3DAnimationPlayer *player,
+                                    const K3DAnimation *animation,
+                                    float value) {
+    K3DAnimationRecord *record = find_animation_record(player, animation);
+
+    if(!animation_record_is_loaded(player, record) ||
+       animation->type != K3D_ANIMATION_TYPE_VERTEX) {
+        return;
+    }
+
+    stop_other_animations_of_type(player, animation);
+    record->state.value = clamp01(value);
 }
 
 void k3d_animation_player_reset(K3DAnimationPlayer *player,

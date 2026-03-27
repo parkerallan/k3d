@@ -44,6 +44,16 @@ void k3d_animation_player_stop(K3DAnimationPlayer *player,
 void k3d_animation_player_toggle(K3DAnimationPlayer *player,
                                  const K3DAnimation *animation);
 
+void k3d_animation_player_set_value(K3DAnimationPlayer *player,
+                                    const K3DAnimation *animation,
+                                    float value);
+
+float k3d_animation_accumulate_value(float currentValue,
+                                     float inputValue,
+                                     float riseRate,
+                                     float fallRate,
+                                     float deltaSeconds);
+
 void k3d_animation_player_reset(K3DAnimationPlayer *player,
                                 const K3DAnimation *animation);
 

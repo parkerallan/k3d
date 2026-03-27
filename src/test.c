@@ -12,6 +12,9 @@ static GLfloat yrot;
 static GLfloat xspeed;
 static GLfloat yspeed;
 static GLfloat z = -5.0f;
+static GLfloat vertexValue = 0.0f;
+static GLfloat vertexRiseRate = 1.0f;
+static GLfloat vertexFallRate = 0.0f;
 
 static GLuint texture;
 static K3DMesh *mesh = NULL;
@@ -52,7 +55,6 @@ int main(int argc, char **argv) {
     GLboolean xp = GL_FALSE;
     GLboolean yp = GL_FALSE;
     GLboolean lp = GL_FALSE;
-    GLboolean rp = GL_FALSE;
 
     (void)argc;
     (void)argv;
@@ -138,6 +140,7 @@ int main(int argc, char **argv) {
 
     while(1) {
         float deltaSeconds;
+        float triggerValue;
         uint64_t nowTicks;
 
         cont = maple_enum_type(0, MAPLE_FUNC_CONTROLLER);
@@ -151,6 +154,10 @@ int main(int argc, char **argv) {
         if(state->buttons & CONT_START) {
             break;
         }
+
+        nowTicks = timer_ms_gettime64();
+        deltaSeconds = (float)(nowTicks - lastTicks) / 1000.0f;
+        lastTicks = nowTicks;
 
         if(state->buttons & CONT_A) {
             if(z >= -15.0f) {
@@ -200,6 +207,7 @@ int main(int argc, char **argv) {
             yspeed += 0.01f;
         }
 
+        // Skeletal anim on left trigger
         if(state->ltrig > 0x7f) {
             if(!lp) {
                 lp = GL_TRUE;
@@ -210,19 +218,14 @@ int main(int argc, char **argv) {
             lp = GL_FALSE;
         }
 
-        if(state->rtrig > 0x7f) {
-            if(!rp) {
-                rp = GL_TRUE;
-                k3d_animation_player_toggle(player, vertexAnimation);
-            }
-        }
-        else {
-            rp = GL_FALSE;
-        }
+        // Shapekey anim on right trigger
+        triggerValue = (float)state->rtrig / 255.0f;
+        vertexValue = k3d_animation_accumulate_value(vertexValue, triggerValue,
+                                                     vertexRiseRate, vertexFallRate,
+                                                     deltaSeconds);
+        k3d_animation_player_set_value(player, vertexAnimation, vertexValue);
 
-        nowTicks = timer_ms_gettime64();
-        deltaSeconds = (float)(nowTicks - lastTicks) / 1000.0f;
-        lastTicks = nowTicks;
+        // Apply animations
         k3d_animation_player_update(player, deltaSeconds);
 
         if(fog) {
