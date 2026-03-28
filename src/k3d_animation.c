@@ -9,6 +9,11 @@ typedef struct {
     int playing;
     float timeSeconds;
     float value;
+    float weight;
+    float fadeStartWeight;
+    float fadeTargetWeight;
+    float fadeElapsedSeconds;
+    float fadeDurationSeconds;
 } PlaybackState;
 
 typedef struct {
@@ -23,6 +28,7 @@ typedef struct {
 struct K3DAnimationPlayer {
     K3DMesh *mesh;
     K3DSkeleton *skeleton;
+    K3DTransform *bindPoseTransforms;
     GLfloat *morphedVertices;
     GLfloat *animatedVertices;
     GLfloat *animatedNormals;
@@ -32,18 +38,30 @@ struct K3DAnimationPlayer {
     K3DAnimationRecord *animations;
     uint32_t animationCount;
     uint32_t animationCapacity;
+    int skeletalBlendEnabled;
+    float skeletalBlendDurationSeconds;
 };
 
 static float clamp01(float value);
+static void sample_skeletal_transform(K3DTransform *out,
+                                      const K3DSkeletalAnimation *animation,
+                                      uint16_t boneIndex, float timeSeconds);
 
 static void reset_playback_state(PlaybackState *state) {
     state->playing = 0;
     state->timeSeconds = 0.0f;
     state->value = 0.0f;
+    state->weight = 0.0f;
+    state->fadeStartWeight = 0.0f;
+    state->fadeTargetWeight = 0.0f;
+    state->fadeElapsedSeconds = 0.0f;
+    state->fadeDurationSeconds = 0.0f;
 }
 
 static int playback_is_active(const PlaybackState *state) {
-    return state->playing || state->timeSeconds > 0.0f || state->value > 0.0f;
+    return state->playing || state->timeSeconds > 0.0f || state->value > 0.0f ||
+        state->weight > 0.0001f ||
+        fabsf(state->fadeTargetWeight - state->weight) > 0.0001f;
 }
 
 // This is optional for vertex/shapekey animations, if you are using a wave function you would only use set_value()
@@ -72,6 +90,11 @@ float k3d_animation_accumulate_value(float currentValue,
 static void start_playback_state(PlaybackState *state, const char *label) {
     state->playing = 1;
     state->timeSeconds = 0.0f;
+    state->weight = 1.0f;
+    state->fadeStartWeight = 1.0f;
+    state->fadeTargetWeight = 1.0f;
+    state->fadeElapsedSeconds = 0.0f;
+    state->fadeDurationSeconds = 0.0f;
     printf("%s started\n", label);
 }
 
@@ -79,7 +102,43 @@ static void stop_playback_state(PlaybackState *state, const char *label) {
     state->playing = 0;
     state->timeSeconds = 0.0f;
     state->value = 0.0f;
+    state->weight = 0.0f;
+    state->fadeStartWeight = 0.0f;
+    state->fadeTargetWeight = 0.0f;
+    state->fadeElapsedSeconds = 0.0f;
+    state->fadeDurationSeconds = 0.0f;
     printf("%s stopped\n", label);
+}
+
+static void begin_weight_fade(PlaybackState *state, float targetWeight,
+                              float durationSeconds) {
+    state->fadeStartWeight = clamp01(state->weight);
+    state->fadeTargetWeight = clamp01(targetWeight);
+    state->fadeElapsedSeconds = 0.0f;
+    state->fadeDurationSeconds = durationSeconds > 0.0f ? durationSeconds : 0.0f;
+
+    if(state->fadeDurationSeconds == 0.0f) {
+        state->weight = state->fadeTargetWeight;
+        state->fadeElapsedSeconds = 0.0f;
+    }
+}
+
+static void start_skeletal_playback(PlaybackState *state, float startWeight,
+                                    float targetWeight, float durationSeconds) {
+    state->playing = 1;
+    state->timeSeconds = 0.0f;
+    state->weight = clamp01(startWeight);
+    begin_weight_fade(state, targetWeight, durationSeconds);
+}
+
+static void fade_skeletal_playback(PlaybackState *state, float targetWeight,
+                                   float durationSeconds) {
+    if(!playback_is_active(state) && targetWeight <= 0.0f) {
+        return;
+    }
+
+    state->playing = 1;
+    begin_weight_fade(state, targetWeight, durationSeconds);
 }
 
 static char *duplicate_animation_name(const char *name) {
@@ -193,6 +252,43 @@ static void stop_other_animations_of_type(K3DAnimationPlayer *player,
     }
 }
 
+static float get_skeletal_blend_duration(const K3DAnimationPlayer *player) {
+    if(!player || !player->skeletalBlendEnabled) {
+        return 0.0f;
+    }
+
+    return player->skeletalBlendDurationSeconds;
+}
+
+static int skeletal_record_is_active(const K3DAnimationPlayer *player,
+                                     const K3DAnimationRecord *record) {
+    return player && record && record->info.type == K3D_ANIMATION_TYPE_SKELETAL &&
+        animation_record_is_loaded(player, record) && playback_is_active(&record->state) &&
+        record->state.weight > 0.0001f;
+}
+
+static void fade_other_skeletal_animations(K3DAnimationPlayer *player,
+                                           const K3DAnimation *animation,
+                                           float durationSeconds) {
+    uint32_t index;
+
+    if(!player || !animation) {
+        return;
+    }
+
+    for(index = 0; index < player->animationCount; ++index) {
+        K3DAnimationRecord *record = &player->animations[index];
+
+        if(record->info.type != K3D_ANIMATION_TYPE_SKELETAL || &record->info == animation) {
+            continue;
+        }
+
+        if(playback_is_active(&record->state)) {
+            fade_skeletal_playback(&record->state, 0.0f, durationSeconds);
+        }
+    }
+}
+
 static void copy_vertex_data(GLfloat *dst, const GLfloat *src, uint32_t vertexCount) {
     memcpy(dst, src, vertexCount * 3 * sizeof(GLfloat));
 }
@@ -254,9 +350,11 @@ static float animation_duration_seconds(uint16_t frameCount, uint16_t fps) {
 }
 
 static void free_skeletal_runtime(K3DAnimationPlayer *player) {
+    free(player->bindPoseTransforms);
     free(player->boneMatrices);
     free(player->boneNormalMatrices);
     free(player->worldMatrices);
+    player->bindPoseTransforms = NULL;
     player->boneMatrices = NULL;
     player->boneNormalMatrices = NULL;
     player->worldMatrices = NULL;
@@ -334,8 +432,11 @@ static int ensure_skeletal_buffers(K3DAnimationPlayer *player) {
     player->boneMatrices = (GLfloat *)malloc(player->skeleton->boneCount * 16 * sizeof(GLfloat));
     player->boneNormalMatrices = (GLfloat *)malloc(player->skeleton->boneCount * 9 * sizeof(GLfloat));
     player->worldMatrices = (GLfloat *)malloc(player->skeleton->boneCount * 16 * sizeof(GLfloat));
+    player->bindPoseTransforms = (K3DTransform *)malloc(player->skeleton->boneCount *
+                                                        sizeof(K3DTransform));
 
-    if(!player->boneMatrices || !player->boneNormalMatrices || !player->worldMatrices) {
+    if(!player->boneMatrices || !player->boneNormalMatrices || !player->worldMatrices ||
+       !player->bindPoseTransforms) {
         free_skeletal_runtime(player);
         return 0;
     }
@@ -422,6 +523,58 @@ static void mat4_multiply(GLfloat *out, const GLfloat *a, const GLfloat *b) {
     memcpy(out, result, sizeof(result));
 }
 
+static int invert_affine_matrix(GLfloat *out, const GLfloat *matrix) {
+    GLfloat a00 = matrix[0];
+    GLfloat a01 = matrix[4];
+    GLfloat a02 = matrix[8];
+    GLfloat a10 = matrix[1];
+    GLfloat a11 = matrix[5];
+    GLfloat a12 = matrix[9];
+    GLfloat a20 = matrix[2];
+    GLfloat a21 = matrix[6];
+    GLfloat a22 = matrix[10];
+    GLfloat cofactor00 = a11 * a22 - a12 * a21;
+    GLfloat cofactor01 = a02 * a21 - a01 * a22;
+    GLfloat cofactor02 = a01 * a12 - a02 * a11;
+    GLfloat cofactor10 = a12 * a20 - a10 * a22;
+    GLfloat cofactor11 = a00 * a22 - a02 * a20;
+    GLfloat cofactor12 = a02 * a10 - a00 * a12;
+    GLfloat cofactor20 = a10 * a21 - a11 * a20;
+    GLfloat cofactor21 = a01 * a20 - a00 * a21;
+    GLfloat cofactor22 = a00 * a11 - a01 * a10;
+    GLfloat determinant = a00 * cofactor00 + a01 * cofactor10 + a02 * cofactor20;
+    GLfloat tx;
+    GLfloat ty;
+    GLfloat tz;
+
+    if(fabsf(determinant) < 0.000001f) {
+        return 0;
+    }
+
+    determinant = 1.0f / determinant;
+    out[0] = cofactor00 * determinant;
+    out[1] = cofactor10 * determinant;
+    out[2] = cofactor20 * determinant;
+    out[3] = 0.0f;
+    out[4] = cofactor01 * determinant;
+    out[5] = cofactor11 * determinant;
+    out[6] = cofactor21 * determinant;
+    out[7] = 0.0f;
+    out[8] = cofactor02 * determinant;
+    out[9] = cofactor12 * determinant;
+    out[10] = cofactor22 * determinant;
+    out[11] = 0.0f;
+
+    tx = matrix[12];
+    ty = matrix[13];
+    tz = matrix[14];
+    out[12] = -(out[0] * tx + out[4] * ty + out[8] * tz);
+    out[13] = -(out[1] * tx + out[5] * ty + out[9] * tz);
+    out[14] = -(out[2] * tx + out[6] * ty + out[10] * tz);
+    out[15] = 1.0f;
+    return 1;
+}
+
 static void quat_normalize(GLfloat *quat) {
     GLfloat length = sqrtf(quat[0] * quat[0] + quat[1] * quat[1] +
                            quat[2] * quat[2] + quat[3] * quat[3]);
@@ -457,6 +610,49 @@ static void quat_nlerp(GLfloat *out, const GLfloat *a, const GLfloat *b, GLfloat
     out[2] = a[2] + (endQuat[2] - a[2]) * t;
     out[3] = a[3] + (endQuat[3] - a[3]) * t;
     quat_normalize(out);
+}
+
+static float quat_dot(const GLfloat *a, const GLfloat *b) {
+    return a[0] * b[0] + a[1] * b[1] + a[2] * b[2] + a[3] * b[3];
+}
+
+static void matrix_to_quaternion(GLfloat *quat, const GLfloat *matrix) {
+    GLfloat trace = matrix[0] + matrix[5] + matrix[10];
+
+    if(trace > 0.0f) {
+        GLfloat scale = sqrtf(trace + 1.0f) * 2.0f;
+
+        quat[3] = 0.25f * scale;
+        quat[0] = (matrix[6] - matrix[9]) / scale;
+        quat[1] = (matrix[8] - matrix[2]) / scale;
+        quat[2] = (matrix[1] - matrix[4]) / scale;
+    }
+    else if(matrix[0] > matrix[5] && matrix[0] > matrix[10]) {
+        GLfloat scale = sqrtf(1.0f + matrix[0] - matrix[5] - matrix[10]) * 2.0f;
+
+        quat[3] = (matrix[6] - matrix[9]) / scale;
+        quat[0] = 0.25f * scale;
+        quat[1] = (matrix[4] + matrix[1]) / scale;
+        quat[2] = (matrix[8] + matrix[2]) / scale;
+    }
+    else if(matrix[5] > matrix[10]) {
+        GLfloat scale = sqrtf(1.0f + matrix[5] - matrix[0] - matrix[10]) * 2.0f;
+
+        quat[3] = (matrix[8] - matrix[2]) / scale;
+        quat[0] = (matrix[4] + matrix[1]) / scale;
+        quat[1] = 0.25f * scale;
+        quat[2] = (matrix[9] + matrix[6]) / scale;
+    }
+    else {
+        GLfloat scale = sqrtf(1.0f + matrix[10] - matrix[0] - matrix[5]) * 2.0f;
+
+        quat[3] = (matrix[1] - matrix[4]) / scale;
+        quat[0] = (matrix[8] + matrix[2]) / scale;
+        quat[1] = (matrix[9] + matrix[6]) / scale;
+        quat[2] = 0.25f * scale;
+    }
+
+    quat_normalize(quat);
 }
 
 static void compose_transform_matrix(GLfloat *matrix, const K3DTransform *transform) {
@@ -497,6 +693,182 @@ static void compose_transform_matrix(GLfloat *matrix, const K3DTransform *transf
     matrix[13] = transform->translation[1];
     matrix[14] = transform->translation[2];
     matrix[15] = 1.0f;
+}
+
+static void decompose_transform_matrix(K3DTransform *transform, const GLfloat *matrix) {
+    GLfloat rotationMatrix[16] = {
+        1.0f, 0.0f, 0.0f, 0.0f,
+        0.0f, 1.0f, 0.0f, 0.0f,
+        0.0f, 0.0f, 1.0f, 0.0f,
+        0.0f, 0.0f, 0.0f, 1.0f
+    };
+    GLfloat scaleX;
+    GLfloat scaleY;
+    GLfloat scaleZ;
+
+    transform->translation[0] = matrix[12];
+    transform->translation[1] = matrix[13];
+    transform->translation[2] = matrix[14];
+
+    scaleX = sqrtf(matrix[0] * matrix[0] + matrix[1] * matrix[1] + matrix[2] * matrix[2]);
+    scaleY = sqrtf(matrix[4] * matrix[4] + matrix[5] * matrix[5] + matrix[6] * matrix[6]);
+    scaleZ = sqrtf(matrix[8] * matrix[8] + matrix[9] * matrix[9] + matrix[10] * matrix[10]);
+
+    transform->scale[0] = scaleX > 0.00001f ? scaleX : 1.0f;
+    transform->scale[1] = scaleY > 0.00001f ? scaleY : 1.0f;
+    transform->scale[2] = scaleZ > 0.00001f ? scaleZ : 1.0f;
+
+    if(scaleX > 0.00001f) {
+        rotationMatrix[0] = matrix[0] / scaleX;
+        rotationMatrix[1] = matrix[1] / scaleX;
+        rotationMatrix[2] = matrix[2] / scaleX;
+    }
+
+    if(scaleY > 0.00001f) {
+        rotationMatrix[4] = matrix[4] / scaleY;
+        rotationMatrix[5] = matrix[5] / scaleY;
+        rotationMatrix[6] = matrix[6] / scaleY;
+    }
+
+    if(scaleZ > 0.00001f) {
+        rotationMatrix[8] = matrix[8] / scaleZ;
+        rotationMatrix[9] = matrix[9] / scaleZ;
+        rotationMatrix[10] = matrix[10] / scaleZ;
+    }
+
+    matrix_to_quaternion(transform->rotation, rotationMatrix);
+}
+
+static int build_bind_pose_transforms(K3DAnimationPlayer *player) {
+    uint16_t boneIndex;
+
+    if(!player || !player->skeleton || !player->bindPoseTransforms) {
+        return 0;
+    }
+
+    for(boneIndex = 0; boneIndex < player->skeleton->boneCount; ++boneIndex) {
+        GLfloat bindWorld[16];
+        GLfloat bindLocal[16];
+        int16_t parentIndex = player->skeleton->bones[boneIndex].parentIndex;
+
+        if(!invert_affine_matrix(bindWorld,
+                                 player->skeleton->bones[boneIndex].inverseBind)) {
+            return 0;
+        }
+
+        if(parentIndex >= 0 && parentIndex < (int16_t)player->skeleton->boneCount) {
+            mat4_multiply(bindLocal,
+                          player->skeleton->bones[parentIndex].inverseBind,
+                          bindWorld);
+        }
+        else {
+            memcpy(bindLocal, bindWorld, sizeof(bindLocal));
+        }
+
+        decompose_transform_matrix(&player->bindPoseTransforms[boneIndex], bindLocal);
+    }
+
+    return 1;
+}
+
+static void accumulate_weighted_transform(const K3DTransform *transform, float weight,
+                                          GLfloat *translationSum, GLfloat *scaleSum,
+                                          GLfloat *rotationSum, GLfloat *referenceRotation,
+                                          int *hasRotation) {
+    GLfloat adjustedRotation[4];
+    int component;
+
+    if(weight <= 0.0001f) {
+        return;
+    }
+
+    for(component = 0; component < 3; ++component) {
+        translationSum[component] += transform->translation[component] * weight;
+        scaleSum[component] += transform->scale[component] * weight;
+    }
+
+    memcpy(adjustedRotation, transform->rotation, sizeof(adjustedRotation));
+    if(!*hasRotation) {
+        memcpy(referenceRotation, adjustedRotation, sizeof(adjustedRotation));
+        *hasRotation = 1;
+    }
+    else if(quat_dot(referenceRotation, adjustedRotation) < 0.0f) {
+        adjustedRotation[0] = -adjustedRotation[0];
+        adjustedRotation[1] = -adjustedRotation[1];
+        adjustedRotation[2] = -adjustedRotation[2];
+        adjustedRotation[3] = -adjustedRotation[3];
+    }
+
+    rotationSum[0] += adjustedRotation[0] * weight;
+    rotationSum[1] += adjustedRotation[1] * weight;
+    rotationSum[2] += adjustedRotation[2] * weight;
+    rotationSum[3] += adjustedRotation[3] * weight;
+}
+
+static void sample_blended_skeletal_transform(K3DTransform *out,
+                                              const K3DAnimationPlayer *player,
+                                              uint16_t boneIndex) {
+    GLfloat translationSum[3] = {0.0f, 0.0f, 0.0f};
+    GLfloat scaleSum[3] = {0.0f, 0.0f, 0.0f};
+    GLfloat rotationSum[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+    GLfloat referenceRotation[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+    float clipWeightScale = 1.0f;
+    float weightedClipSum = 0.0f;
+    float residualWeight;
+    int hasRotation = 0;
+    uint32_t index;
+    int component;
+
+    for(index = 0; index < player->animationCount; ++index) {
+        const K3DAnimationRecord *record = &player->animations[index];
+
+        if(skeletal_record_is_active(player, record) && record->clip.skeletal) {
+            weightedClipSum += record->state.weight;
+        }
+    }
+
+    if(weightedClipSum > 1.0f) {
+        clipWeightScale = 1.0f / weightedClipSum;
+    }
+
+    for(index = 0; index < player->animationCount; ++index) {
+        const K3DAnimationRecord *record = &player->animations[index];
+        K3DTransform sampledTransform;
+
+        if(!skeletal_record_is_active(player, record) || !record->clip.skeletal) {
+            continue;
+        }
+
+        sample_skeletal_transform(&sampledTransform, record->clip.skeletal, boneIndex,
+                                  record->state.timeSeconds);
+        accumulate_weighted_transform(&sampledTransform,
+                                      record->state.weight * clipWeightScale,
+                                      translationSum, scaleSum, rotationSum,
+                                      referenceRotation, &hasRotation);
+    }
+
+    residualWeight = 1.0f - weightedClipSum * clipWeightScale;
+    if(residualWeight > 0.0001f && player->bindPoseTransforms) {
+        accumulate_weighted_transform(&player->bindPoseTransforms[boneIndex], residualWeight,
+                                      translationSum, scaleSum, rotationSum,
+                                      referenceRotation, &hasRotation);
+    }
+
+    for(component = 0; component < 3; ++component) {
+        out->translation[component] = translationSum[component];
+        out->scale[component] = scaleSum[component];
+    }
+
+    if(hasRotation) {
+        memcpy(out->rotation, rotationSum, sizeof(rotationSum));
+        quat_normalize(out->rotation);
+    }
+    else {
+        out->rotation[0] = 0.0f;
+        out->rotation[1] = 0.0f;
+        out->rotation[2] = 0.0f;
+        out->rotation[3] = 1.0f;
+    }
 }
 
 static void build_normal_matrix(GLfloat *out, const GLfloat *matrix) {
@@ -576,12 +948,39 @@ static void update_playback_state(PlaybackState *state, float deltaSeconds, floa
     }
 
     state->timeSeconds += deltaSeconds;
+
+    if(state->fadeTargetWeight != state->weight) {
+        if(state->fadeDurationSeconds <= 0.0f) {
+            state->weight = state->fadeTargetWeight;
+        }
+        else {
+            float alpha;
+
+            state->fadeElapsedSeconds += deltaSeconds;
+            alpha = clamp01(state->fadeElapsedSeconds / state->fadeDurationSeconds);
+            state->weight = state->fadeStartWeight +
+                (state->fadeTargetWeight - state->fadeStartWeight) * alpha;
+        }
+    }
+
     if(durationSeconds <= 0.0f) {
+        if(state->fadeTargetWeight <= 0.0f && state->weight <= 0.0001f) {
+            reset_playback_state(state);
+        }
         return;
     }
 
     while(state->timeSeconds > durationSeconds) {
         state->timeSeconds -= durationSeconds;
+    }
+
+    if(state->fadeTargetWeight <= 0.0f && state->weight <= 0.0001f) {
+        reset_playback_state(state);
+        return;
+    }
+
+    if(state->fadeTargetWeight > 0.0f && state->weight > 0.9999f) {
+        state->weight = 1.0f;
     }
 }
 
@@ -617,9 +1016,9 @@ static void apply_vertex_animation(K3DAnimationPlayer *player) {
 }
 
 static void apply_skeletal_animation(K3DAnimationPlayer *player) {
-    K3DAnimationRecord *record;
     uint16_t boneIndex;
     uint32_t vertexIndex;
+    int hasActiveSkeletal = 0;
 
     if(!player->mesh || !player->animatedVertices || !player->morphedVertices) {
         return;
@@ -632,11 +1031,29 @@ static void apply_skeletal_animation(K3DAnimationPlayer *player) {
                          player->mesh->vertexCount);
     }
 
-    record = find_active_animation_by_type(player, K3D_ANIMATION_TYPE_SKELETAL);
-    if(!player->skeleton || !record || !record->clip.skeletal || !player->boneMatrices ||
-       !player->boneNormalMatrices || !player->worldMatrices ||
-       player->skeleton->vertexCount != player->mesh->vertexCount ||
-       player->skeleton->boneCount != record->clip.skeletal->boneCount) {
+    if(!player->skeleton || !player->boneMatrices || !player->boneNormalMatrices ||
+       !player->worldMatrices || !player->bindPoseTransforms ||
+       player->skeleton->vertexCount != player->mesh->vertexCount) {
+        return;
+    }
+
+    for(vertexIndex = 0; vertexIndex < player->animationCount; ++vertexIndex) {
+        K3DAnimationRecord *record = &player->animations[vertexIndex];
+
+        if(record->info.type != K3D_ANIMATION_TYPE_SKELETAL) {
+            continue;
+        }
+
+        if(record->clip.skeletal && record->clip.skeletal->boneCount != player->skeleton->boneCount) {
+            return;
+        }
+
+        if(skeletal_record_is_active(player, record)) {
+            hasActiveSkeletal = 1;
+        }
+    }
+
+    if(!hasActiveSkeletal) {
         return;
     }
 
@@ -647,8 +1064,7 @@ static void apply_skeletal_animation(K3DAnimationPlayer *player) {
         GLfloat *skinMatrix = &player->boneMatrices[boneIndex * 16];
         int16_t parentIndex = player->skeleton->bones[boneIndex].parentIndex;
 
-        sample_skeletal_transform(&sampledTransform, record->clip.skeletal, boneIndex,
-                                  record->state.timeSeconds);
+        sample_blended_skeletal_transform(&sampledTransform, player, boneIndex);
         compose_transform_matrix(localMatrix, &sampledTransform);
 
         if(parentIndex >= 0 && parentIndex < (int16_t)player->skeleton->boneCount) {
@@ -748,6 +1164,8 @@ K3DAnimationPlayer *k3d_animation_player_create(K3DMesh *mesh,
 
     player->mesh = mesh;
     player->skeleton = skeleton;
+    player->skeletalBlendEnabled = 0;
+    player->skeletalBlendDurationSeconds = 0.25f;
     return player;
 }
 
@@ -769,6 +1187,10 @@ K3DAnimation *k3d_animation_player_add_skeletal(K3DAnimationPlayer *player,
     }
 
     if(!ensure_skeletal_buffers(player)) {
+        return NULL;
+    }
+
+    if(!build_bind_pose_transforms(player)) {
         return NULL;
     }
 
@@ -882,8 +1304,19 @@ void k3d_animation_player_render(const K3DAnimationPlayer *player) {
 void k3d_animation_player_play(K3DAnimationPlayer *player,
                                const K3DAnimation *animation) {
     K3DAnimationRecord *record = find_animation_record(player, animation);
+    float durationSeconds;
 
     if(!animation_record_is_loaded(player, record)) {
+        return;
+    }
+
+    if(animation->type == K3D_ANIMATION_TYPE_SKELETAL) {
+        durationSeconds = get_skeletal_blend_duration(player);
+        fade_other_skeletal_animations(player, animation, durationSeconds);
+        start_skeletal_playback(&record->state,
+                                durationSeconds > 0.0f ? 0.0f : 1.0f,
+                                1.0f, durationSeconds);
+        printf("%s started\n", record->info.name ? record->info.name : "animation");
         return;
     }
 
@@ -898,8 +1331,21 @@ void k3d_animation_player_play(K3DAnimationPlayer *player,
 void k3d_animation_player_stop(K3DAnimationPlayer *player,
                                const K3DAnimation *animation) {
     K3DAnimationRecord *record = find_animation_record(player, animation);
+    float durationSeconds;
 
     if(!animation_record_is_loaded(player, record)) {
+        return;
+    }
+
+    if(animation->type == K3D_ANIMATION_TYPE_SKELETAL) {
+        durationSeconds = get_skeletal_blend_duration(player);
+        if(durationSeconds > 0.0f && playback_is_active(&record->state)) {
+            fade_skeletal_playback(&record->state, 0.0f, durationSeconds);
+        }
+        else {
+            stop_playback_state(&record->state,
+                                record->info.name ? record->info.name : "animation");
+        }
         return;
     }
 
@@ -924,7 +1370,7 @@ void k3d_animation_player_toggle(K3DAnimationPlayer *player,
         return;
     }
 
-    if(record->state.playing) {
+    if(record->state.weight > 0.5f || record->state.fadeTargetWeight > 0.5f) {
         k3d_animation_player_stop(player, animation);
         return;
     }
@@ -944,6 +1390,40 @@ void k3d_animation_player_set_value(K3DAnimationPlayer *player,
 
     stop_other_animations_of_type(player, animation);
     record->state.value = clamp01(value);
+}
+
+void k3d_animation_player_set_skeletal_blending(K3DAnimationPlayer *player,
+                                                int enabled) {
+    if(!player) {
+        return;
+    }
+
+    player->skeletalBlendEnabled = enabled ? 1 : 0;
+}
+
+int k3d_animation_player_get_skeletal_blending(const K3DAnimationPlayer *player) {
+    if(!player) {
+        return 0;
+    }
+
+    return player->skeletalBlendEnabled;
+}
+
+void k3d_animation_player_set_skeletal_blend_duration(K3DAnimationPlayer *player,
+                                                      float durationSeconds) {
+    if(!player) {
+        return;
+    }
+
+    player->skeletalBlendDurationSeconds = durationSeconds > 0.0f ? durationSeconds : 0.0f;
+}
+
+float k3d_animation_player_get_skeletal_blend_duration(const K3DAnimationPlayer *player) {
+    if(!player) {
+        return 0.0f;
+    }
+
+    return player->skeletalBlendDurationSeconds;
 }
 
 void k3d_animation_player_reset(K3DAnimationPlayer *player,

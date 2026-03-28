@@ -48,6 +48,16 @@ void k3d_animation_player_set_value(K3DAnimationPlayer *player,
                                     const K3DAnimation *animation,
                                     float value);
 
+void k3d_animation_player_set_skeletal_blending(K3DAnimationPlayer *player,
+                                                int enabled);
+
+int k3d_animation_player_get_skeletal_blending(const K3DAnimationPlayer *player);
+
+void k3d_animation_player_set_skeletal_blend_duration(K3DAnimationPlayer *player,
+                                                      float durationSeconds);
+
+float k3d_animation_player_get_skeletal_blend_duration(const K3DAnimationPlayer *player);
+
 float k3d_animation_accumulate_value(float currentValue,
                                      float inputValue,
                                      float riseRate,

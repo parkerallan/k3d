@@ -22,9 +22,11 @@ static K3DMesh *mesh = NULL;
 static K3DMesh *claire = NULL;
 static K3DSkeleton *skeleton = NULL;
 static K3DSkeletalAnimation *skeletalClip = NULL;
+static K3DSkeletalAnimation *twistClip = NULL;
 static K3DVertexAnimation *vertexClip = NULL;
 static K3DAnimationPlayer *player = NULL;
 static const K3DAnimation *skeletalAnimation = NULL;
+static const K3DAnimation *twistAnimation = NULL;
 static const K3DAnimation *vertexAnimation = NULL;
 
 GLuint fogType = 0;
@@ -107,11 +109,14 @@ int main(int argc, char **argv) {
     claire = k3d_load("/rd/claire.k3d");
     skeleton = k3d_skeleton_load("/rd/ik-test/ik-test.k3sk");
     skeletalClip = k3d_skeletal_animation_load("/rd/ik-test/ik-test_Wiggle.k3sa");
+    twistClip = k3d_skeletal_animation_load("/rd/ik-test/ik-test_Twist.k3sa");
     vertexClip = k3d_vertex_animation_load("/rd/ik-test/ik-test_Squash.k3va");
 
-    if(!texture || !rockTexture || !mesh || !claire || !skeleton || !skeletalClip || !vertexClip) {
+    if(!texture || !rockTexture || !mesh || !claire || !skeleton || !skeletalClip ||
+       !twistClip || !vertexClip) {
         printf("Failed to load K3D assets, exiting\n");
         k3d_vertex_animation_free(vertexClip);
+        k3d_skeletal_animation_free(twistClip);
         k3d_skeletal_animation_free(skeletalClip);
         k3d_skeleton_free(skeleton);
         k3d_free(claire);
@@ -123,6 +128,7 @@ int main(int argc, char **argv) {
     if(!player) {
         printf("Failed to create animation player, exiting\n");
         k3d_vertex_animation_free(vertexClip);
+        k3d_skeletal_animation_free(twistClip);
         k3d_skeletal_animation_free(skeletalClip);
         k3d_skeleton_free(skeleton);
         k3d_free(claire);
@@ -131,8 +137,25 @@ int main(int argc, char **argv) {
     }
 
     skeletalAnimation = k3d_animation_player_add_skeletal(player, "Wiggle", skeletalClip);
+    twistAnimation = k3d_animation_player_add_skeletal(player, "Twist", twistClip);
 
     vertexAnimation = k3d_animation_player_add_vertex(player, "Squash", vertexClip);
+
+    if(!skeletalAnimation || !twistAnimation || !vertexAnimation) {
+        printf("Failed to register K3D animations, exiting\n");
+        k3d_animation_player_free(player);
+        k3d_vertex_animation_free(vertexClip);
+        k3d_skeletal_animation_free(twistClip);
+        k3d_skeletal_animation_free(skeletalClip);
+        k3d_skeleton_free(skeleton);
+        k3d_free(claire);
+        k3d_free(mesh);
+        return 1;
+    }
+
+    // Enable blending
+    k3d_animation_player_set_skeletal_blending(player, 1);
+    k3d_animation_player_set_skeletal_blend_duration(player, 0.25f);
 
     lastTicks = timer_ms_gettime64();
 
@@ -239,6 +262,7 @@ int main(int argc, char **argv) {
 
     k3d_animation_player_free(player);
     k3d_vertex_animation_free(vertexClip);
+    k3d_skeletal_animation_free(twistClip);
     k3d_skeletal_animation_free(skeletalClip);
     k3d_skeleton_free(skeleton);
     k3d_free(claire);
