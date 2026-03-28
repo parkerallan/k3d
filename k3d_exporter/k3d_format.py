@@ -1,6 +1,5 @@
 """
 K3D Binary Format Writer
-(c)2026 KallistiOS
 
 Utilities for writing K3D binary 3D model files.
 """

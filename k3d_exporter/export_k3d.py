@@ -1,8 +1,7 @@
 """
 K3D Exporter for Blender
-(c)2026 KallistiOS
 
-Exports Blender meshes to K3D binary format optimized for Dreamcast/KGL.
+Exports Blender meshes to K3D binary format optimized for KallistiOS KGL.
 """
 
 import os
@@ -11,7 +10,7 @@ import re
 import bpy
 import bmesh
 from bpy_extras.io_utils import ExportHelper
-from bpy.props import StringProperty, BoolProperty
+from bpy.props import StringProperty, BoolProperty, FloatProperty
 from . import k3d_format
 
 
@@ -44,6 +43,15 @@ class ExportK3D(bpy.types.Operator, ExportHelper):
         name="Export UVs",
         description="Include texture coordinates in export",
         default=True,
+    )
+
+    normal_face_bias: FloatProperty(
+        name="Normal Face Bias",
+        description="Blend smooth normals toward the polygon normal. Higher values make faces fall into shadow sooner",
+        default=0.0,
+        min=0.0,
+        max=1.0,
+        subtype='FACTOR',
     )
 
     export_skeleton: BoolProperty(
@@ -142,8 +150,8 @@ class ExportK3D(bpy.types.Operator, ExportHelper):
     def extract_mesh_data(self, mesh):
         """
         Extract vertex, normal, UV, and index data from Blender mesh.
-        Respects Blender's Shade Flat/Smooth shading:
-          - Shade Smooth: Uses vertex normals (averaged from connected faces)
+                Respects Blender's Shade Flat/Smooth shading:
+                    - Shade Smooth: Uses split loop normals from Blender
           - Shade Flat: Uses polygon face normals
         NO vertex deduplication to avoid shared-vertex lighting artifacts.
         
@@ -162,12 +170,24 @@ class ExportK3D(bpy.types.Operator, ExportHelper):
         source_vertex_indices = []
         
         next_index = 0
+        face_bias = self.normal_face_bias
         
         def normalize(v):
             length = math.sqrt(v[0]*v[0] + v[1]*v[1] + v[2]*v[2])
             if length > 0.0001:
                 return (v[0]/length, v[1]/length, v[2]/length)
             return (0.0, 0.0, 1.0)
+
+        def apply_face_bias(loop_normal, face_normal):
+            if face_bias <= 0.0:
+                return loop_normal
+
+            keep = 1.0 - face_bias
+            return normalize((
+                loop_normal[0] * keep + face_normal[0] * face_bias,
+                loop_normal[1] * keep + face_normal[1] * face_bias,
+                loop_normal[2] * keep + face_normal[2] * face_bias,
+            ))
         
         # Get UV layer
         uv_layer = None
@@ -204,7 +224,10 @@ class ExportK3D(bpy.types.Operator, ExportHelper):
                     # BRANCHING: Smooth vs Flat shading
                     if self.export_normals:
                         if use_smooth_shading:
-                            normal_orig = normalize(tuple(vertex.normal))  # SMOOTH: vertex normal
+                            normal_orig = apply_face_bias(
+                                normalize(tuple(loop.normal)),
+                                poly_normal,
+                            )
                         else:
                             normal_orig = poly_normal  # FLAT: polygon normal
                     else:
@@ -233,7 +256,10 @@ class ExportK3D(bpy.types.Operator, ExportHelper):
                     # BRANCHING: Smooth vs Flat shading
                     if self.export_normals:
                         if use_smooth_shading:
-                            normal_orig = normalize(tuple(vertex.normal))
+                            normal_orig = apply_face_bias(
+                                normalize(tuple(loop.normal)),
+                                poly_normal,
+                            )
                         else:
                             normal_orig = poly_normal
                     else:
@@ -258,7 +284,10 @@ class ExportK3D(bpy.types.Operator, ExportHelper):
                     # BRANCHING: Smooth vs Flat shading
                     if self.export_normals:
                         if use_smooth_shading:
-                            normal_orig = normalize(tuple(vertex.normal))
+                            normal_orig = apply_face_bias(
+                                normalize(tuple(loop.normal)),
+                                poly_normal,
+                            )
                         else:
                             normal_orig = poly_normal
                     else:
@@ -287,7 +316,10 @@ class ExportK3D(bpy.types.Operator, ExportHelper):
                         # BRANCHING: Smooth vs Flat shading
                         if self.export_normals:
                             if use_smooth_shading:
-                                normal_orig = normalize(tuple(vertex.normal))
+                                normal_orig = apply_face_bias(
+                                    normalize(tuple(loop.normal)),
+                                    poly_normal,
+                                )
                             else:
                                 normal_orig = poly_normal
                         else:
