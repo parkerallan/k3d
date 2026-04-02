@@ -19,7 +19,7 @@ static GLfloat vertexFallRate = 0.0f;
 static GLuint texture;
 static GLuint rockTexture;
 static K3DMesh *mesh = NULL;
-static K3DMesh *claire = NULL;
+static K3DMesh *oc_design = NULL;
 static K3DSkeleton *skeleton = NULL;
 static K3DSkeletalAnimation *skeletalClip = NULL;
 static K3DSkeletalAnimation *twistClip = NULL;
@@ -48,11 +48,11 @@ static void draw_gl(void) {
     glBindTexture(GL_TEXTURE_2D, texture);
     k3d_animation_player_render(player);
 
-    if(claire) {
+    if(oc_design) {
         glPushMatrix();
         glTranslatef(2.5f, 0.0f, 0.0f);
         glBindTexture(GL_TEXTURE_2D, rockTexture);
-        k3d_render(claire);
+        k3d_render(oc_design);
         glPopMatrix();
     }
 
@@ -102,24 +102,24 @@ int main(int argc, char **argv) {
     glEnable(GL_FOG);
 
     texture = glTextureLoadPVR("/rd/tex/snakeskin.pvr", 0, 0);
-    rockTexture = glTextureLoadPVR("/rd/tex/rock.pvr", 0, 0);
+    rockTexture = glTextureLoadPVR("/rd/char.pvr", 0, 0);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_FILTER, GL_FILTER_BILINEAR);
 
     mesh = k3d_load("/rd/ik-test/ik-test.k3d");
-    claire = k3d_load("/rd/claire.k3d");
+    oc_design = k3d_load("/rd/oc-design.k3d");
     skeleton = k3d_skeleton_load("/rd/ik-test/ik-test.k3sk");
     skeletalClip = k3d_skeletal_animation_load("/rd/ik-test/ik-test_Wiggle.k3sa");
     twistClip = k3d_skeletal_animation_load("/rd/ik-test/ik-test_Twist.k3sa");
     vertexClip = k3d_vertex_animation_load("/rd/ik-test/ik-test_Squash.k3va");
 
-    if(!texture || !rockTexture || !mesh || !claire || !skeleton || !skeletalClip ||
+    if(!texture || !rockTexture || !mesh || !oc_design || !skeleton || !skeletalClip ||
        !twistClip || !vertexClip) {
         printf("Failed to load K3D assets, exiting\n");
         k3d_vertex_animation_free(vertexClip);
         k3d_skeletal_animation_free(twistClip);
         k3d_skeletal_animation_free(skeletalClip);
         k3d_skeleton_free(skeleton);
-        k3d_free(claire);
+        k3d_free(oc_design);
         k3d_free(mesh);
         return 1;
     }
@@ -131,7 +131,7 @@ int main(int argc, char **argv) {
         k3d_skeletal_animation_free(twistClip);
         k3d_skeletal_animation_free(skeletalClip);
         k3d_skeleton_free(skeleton);
-        k3d_free(claire);
+        k3d_free(oc_design);
         k3d_free(mesh);
         return 1;
     }
@@ -148,7 +148,7 @@ int main(int argc, char **argv) {
         k3d_skeletal_animation_free(twistClip);
         k3d_skeletal_animation_free(skeletalClip);
         k3d_skeleton_free(skeleton);
-        k3d_free(claire);
+        k3d_free(oc_design);
         k3d_free(mesh);
         return 1;
     }
@@ -265,7 +265,7 @@ int main(int argc, char **argv) {
     k3d_skeletal_animation_free(twistClip);
     k3d_skeletal_animation_free(skeletalClip);
     k3d_skeleton_free(skeleton);
-    k3d_free(claire);
+    k3d_free(oc_design);
     k3d_free(mesh);
     return 0;
 }

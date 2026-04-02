@@ -45,6 +45,12 @@ class ExportK3D(bpy.types.Operator, ExportHelper):
         default=True,
     )
 
+    flip_uv_v: BoolProperty(
+        name="Flip UV V",
+        description="Flip the V texture coordinate to match the Dreamcast texture origin used by the runtime",
+        default=True,
+    )
+
     normal_face_bias: FloatProperty(
         name="Normal Face Bias",
         description="Blend smooth normals toward the polygon normal. Higher values make faces fall into shadow sooner",
@@ -188,11 +194,41 @@ class ExportK3D(bpy.types.Operator, ExportHelper):
                 loop_normal[1] * keep + face_normal[1] * face_bias,
                 loop_normal[2] * keep + face_normal[2] * face_bias,
             ))
+
+        def convert_uv(loop_index):
+            if not uv_layer or not self.export_uvs:
+                return (0.0, 0.0)
+
+            uv = uv_layer[loop_index].uv
+            if self.flip_uv_v:
+                return (uv.x, 1.0 - uv.y)
+
+            return (uv.x, uv.y)
+
+        def find_render_uv_layer():
+            layer = None
+
+            if not self.export_uvs or not mesh.uv_layers:
+                return None
+
+            for candidate in mesh.uv_layers:
+                if getattr(candidate, "active_render", False):
+                    layer = candidate
+                    break
+
+            if layer is None:
+                layer = getattr(mesh.uv_layers, "active", None)
+
+            if layer is None and len(mesh.uv_layers) > 0:
+                layer = mesh.uv_layers[0]
+
+            return layer
         
         # Get UV layer
         uv_layer = None
-        if self.export_uvs and mesh.uv_layers.active:
-            uv_layer = mesh.uv_layers.active.data
+        render_layer = find_render_uv_layer()
+        if render_layer is not None:
+            uv_layer = render_layer.data
         
         # Auto-detect primitive type and shading mode from geometry
         all_tris = all(len(poly.vertices) == 3 for poly in mesh.polygons)
@@ -233,7 +269,7 @@ class ExportK3D(bpy.types.Operator, ExportHelper):
                     else:
                         normal_orig = (0.0, 0.0, 0.0)
                     
-                    uv_orig = tuple(uv_layer[loop_idx].uv) if (uv_layer and self.export_uvs) else (0.0, 0.0)
+                    uv_orig = convert_uv(loop_idx)
                     
                     vertices.append(pos_orig)
                     normals.append(normal_orig)
@@ -265,7 +301,7 @@ class ExportK3D(bpy.types.Operator, ExportHelper):
                     else:
                         normal_orig = (0.0, 0.0, 0.0)
                     
-                    uv_orig = tuple(uv_layer[loop_list[i]].uv) if (uv_layer and self.export_uvs) else (0.0, 0.0)
+                    uv_orig = convert_uv(loop_list[i])
                     
                     vertices.append(pos_orig)
                     normals.append(normal_orig)
@@ -293,7 +329,7 @@ class ExportK3D(bpy.types.Operator, ExportHelper):
                     else:
                         normal_orig = (0.0, 0.0, 0.0)
                     
-                    uv_orig = tuple(uv_layer[loop_list[i]].uv) if (uv_layer and self.export_uvs) else (0.0, 0.0)
+                    uv_orig = convert_uv(loop_list[i])
                     
                     vertices.append(pos_orig)
                     normals.append(normal_orig)
@@ -325,7 +361,7 @@ class ExportK3D(bpy.types.Operator, ExportHelper):
                         else:
                             normal_orig = (0.0, 0.0, 0.0)
                         
-                        uv_orig = tuple(uv_layer[loop_idx].uv) if (uv_layer and self.export_uvs) else (0.0, 0.0)
+                        uv_orig = convert_uv(loop_idx)
                         
                         vertices.append(pos_orig)
                         normals.append(normal_orig)
