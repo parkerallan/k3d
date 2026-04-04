@@ -6,7 +6,8 @@ K3D is a simple 3D asset library for KallistiOS projects using KGL. In this repo
 - A C runtime library for loading and playing K3D assets in KallistiOS KGL applications
 - A Blender exporter for writing mesh, skeleton, and animation files
 
-Also includes an example with assets so you can see the whole thing working together.
+Also includes an example with assets so you can see the whole thing working together  
+<img src="https://github.com/user-attachments/assets/619ab46e-366e-4b4a-a054-523bf8107ccc" >
 
 ## Runtime Library
 
