@@ -2,7 +2,7 @@
    KallistiOS 2.0.0
 
    k3d.h
-   (c)2026 K3D Format Specification v1.0
+   K3D Format Specification v1.0
    
    Binary 3D model format optimized for Dreamcast/KGL rendering
    with indexed geometry, normals, and UV coordinates.

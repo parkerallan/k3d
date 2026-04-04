@@ -2,7 +2,7 @@
    KallistiOS 2.0.0
 
    k3d_loader.c
-   (c)2026 K3D Binary Model Loader
+   K3D Binary Model Loader
    
    Loads K3D binary 3D models with indexed geometry for optimized rendering.
 */

@@ -1,6 +1,5 @@
 """
 K3D Exporter - Blender Addon
-(c)2026 KallistiOS
 
 Exports Blender meshes to K3D binary format optimized for Dreamcast/KGL rendering.
 The K3D format supports indexed geometry with normals and UV coordinates for
