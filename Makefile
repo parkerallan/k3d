@@ -1,11 +1,12 @@
 
-SRC_DIR = src
+SRC_DIR = example
 BUILD_DIR = build
 TARGET = $(BUILD_DIR)/test.elf
 ROMDISK_IMG = $(BUILD_DIR)/romdisk.img
 ROMDISK_OBJ = $(BUILD_DIR)/romdisk.o
 OBJS = $(BUILD_DIR)/test.o $(BUILD_DIR)/pvr-texture.o \
-	$(BUILD_DIR)/k3d_loader.o $(BUILD_DIR)/k3d_animation.o $(ROMDISK_OBJ)
+	$(BUILD_DIR)/k3d_loader.o $(BUILD_DIR)/k3d_animation.o \
+	$(BUILD_DIR)/font.o $(ROMDISK_OBJ)
 KOS_ROMDISK_DIR = romdisk
 CPPFLAGS += -I$(SRC_DIR)
 

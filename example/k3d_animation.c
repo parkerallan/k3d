@@ -199,25 +199,6 @@ static K3DAnimationRecord *find_animation_record_by_name(const K3DAnimationPlaye
     return NULL;
 }
 
-static K3DAnimationRecord *find_active_animation_by_type(K3DAnimationPlayer *player,
-                                                         K3DAnimationType type) {
-    uint32_t index;
-
-    if(!player) {
-        return NULL;
-    }
-
-    for(index = 0; index < player->animationCount; ++index) {
-        K3DAnimationRecord *record = &player->animations[index];
-
-        if(record->info.type == type && playback_is_active(&record->state)) {
-            return record;
-        }
-    }
-
-    return NULL;
-}
-
 static int animation_record_is_loaded(const K3DAnimationPlayer *player,
                                       const K3DAnimationRecord *record) {
     if(!player || !record) {
@@ -233,23 +214,6 @@ static int animation_record_is_loaded(const K3DAnimationPlayer *player,
     }
 
     return 0;
-}
-
-static void stop_other_animations_of_type(K3DAnimationPlayer *player,
-                                          const K3DAnimation *animation) {
-    uint32_t index;
-
-    if(!player || !animation) {
-        return;
-    }
-
-    for(index = 0; index < player->animationCount; ++index) {
-        K3DAnimationRecord *record = &player->animations[index];
-
-        if(record->info.type == animation->type && &record->info != animation) {
-            reset_playback_state(&record->state);
-        }
-    }
 }
 
 static float get_skeletal_blend_duration(const K3DAnimationPlayer *player) {
@@ -985,9 +949,8 @@ static void update_playback_state(PlaybackState *state, float deltaSeconds, floa
 }
 
 static void apply_vertex_animation(K3DAnimationPlayer *player) {
-    K3DAnimationRecord *record;
+    uint32_t animationIndex;
     uint32_t vertexIndex;
-    float weight = 0.0f;
 
     if(!player->mesh || !player->morphedVertices) {
         return;
@@ -996,22 +959,28 @@ static void apply_vertex_animation(K3DAnimationPlayer *player) {
     copy_vertex_data(player->morphedVertices, player->mesh->vertices,
                      player->mesh->vertexCount);
 
-    record = find_active_animation_by_type(player, K3D_ANIMATION_TYPE_VERTEX);
-    if(!record || !record->clip.vertex ||
-       record->clip.vertex->vertexCount != player->mesh->vertexCount) {
-        return;
-    }
+    for(animationIndex = 0; animationIndex < player->animationCount; ++animationIndex) {
+        K3DAnimationRecord *record = &player->animations[animationIndex];
+        float weight;
 
-    weight = clamp01(record->state.value);
-    if(weight <= 0.0001f) {
-        return;
-    }
+        if(record->info.type != K3D_ANIMATION_TYPE_VERTEX ||
+           !record->clip.vertex ||
+           record->clip.vertex->vertexCount != player->mesh->vertexCount ||
+           !playback_is_active(&record->state)) {
+            continue;
+        }
 
-    for(vertexIndex = 0; vertexIndex < player->mesh->vertexCount; ++vertexIndex) {
-        uint32_t base = vertexIndex * 3;
-        player->morphedVertices[base + 0] += record->clip.vertex->deltas[base + 0] * weight;
-        player->morphedVertices[base + 1] += record->clip.vertex->deltas[base + 1] * weight;
-        player->morphedVertices[base + 2] += record->clip.vertex->deltas[base + 2] * weight;
+        weight = clamp01(record->state.value);
+        if(weight <= 0.0001f) {
+            continue;
+        }
+
+        for(vertexIndex = 0; vertexIndex < player->mesh->vertexCount; ++vertexIndex) {
+            uint32_t base = vertexIndex * 3;
+            player->morphedVertices[base + 0] += record->clip.vertex->deltas[base + 0] * weight;
+            player->morphedVertices[base + 1] += record->clip.vertex->deltas[base + 1] * weight;
+            player->morphedVertices[base + 2] += record->clip.vertex->deltas[base + 2] * weight;
+        }
     }
 }
 
@@ -1320,7 +1289,6 @@ void k3d_animation_player_play(K3DAnimationPlayer *player,
         return;
     }
 
-    stop_other_animations_of_type(player, animation);
     start_playback_state(&record->state, record->info.name ? record->info.name : "animation");
 
     if(animation->type == K3D_ANIMATION_TYPE_VERTEX) {
@@ -1388,7 +1356,6 @@ void k3d_animation_player_set_value(K3DAnimationPlayer *player,
         return;
     }
 
-    stop_other_animations_of_type(player, animation);
     record->state.value = clamp01(value);
 }
 
